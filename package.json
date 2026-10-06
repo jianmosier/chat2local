@@ -1,0 +1,45 @@
+{
+  "name": "chat2local",
+  "version": "0.1.0-alpha.19",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.14.0 <27"
+  },
+  "scripts": {
+    "release": "node --use-env-proxy scripts/release.mjs",
+    "test:terminal": "node --test --test-concurrency=1 tests/terminal.test.mjs tests/existing-connection-http.test.mjs",
+    "test:release": "node --test --test-concurrency=1 tests/release.test.mjs tests/public-release.test.mjs",
+    "setup": "node --use-env-proxy scripts/setup-selfhost.mjs",
+    "manage": "node scripts/launch.mjs --manage",
+    "build:public": "node scripts/build-public.mjs",
+    "test:management": "node --test --test-concurrency=1 tests/public-release.test.mjs tests/private-instance-http.test.mjs tests/existing-connection.test.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:reconnect": "node --test --test-concurrency=1 tests/existing-connection.test.mjs tests/existing-connection-http.test.mjs",
+    "test:installer-entry": "node --test --test-concurrency=1 tests/install-portal.test.mjs tests/install-entry.test.mjs tests/installer-main.test.mjs tests/private-instance-http.test.mjs",
+    "setup:installer-password": "node --use-env-proxy --import ./scripts/maintainer-tls-compat.mjs scripts/setup-installer-password.mjs",
+    "test:private-instance": "node --test --test-concurrency=1 tests/private-instance.test.mjs tests/private-instance-http.test.mjs tests/instance-installer.test.mjs",
+    "test:multi-device": "node --test --test-concurrency=1 tests/device-routing.test.mjs tests/multi-device.test.mjs",
+    "test:accounts": "node --test --test-concurrency=1 tests/account-connections.test.mjs tests/account-transport.test.mjs tests/one-consent.test.mjs tests/oidc-login.test.mjs tests/onboarding-session.test.mjs tests/account-onboarding-http.test.mjs tests/account-entry.test.mjs",
+    "check": "node scripts/check.mjs",
+    "verify": "npm run check && npm test",
+    "start": "node scripts/launch.mjs",
+    "build:windows": "node --use-env-proxy scripts/build-portable.mjs --target win32-x64",
+    "build:portable": "node --use-env-proxy scripts/build-portable.mjs",
+    "build:installers": "node scripts/build-installers.mjs",
+    "test:cross-platform": "node --test --test-concurrency=1 tests/platform.test.mjs tests/installer.test.mjs tests/installer-preflight.test.mjs",
+    "test:portable": "node scripts/test-portable.mjs",
+    "check:relay": "wrangler deploy --dry-run --outdir .artifacts/relay-build",
+    "preview:portable": ".\\dist\\Chat2Local-Windows-x64\\runtime\\node.exe .\\dist\\Chat2Local-Windows-x64\\scripts\\launch.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-oauth-provider": "0.10.3",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260918.0-alpha",
+    "oauth4webapi": "3.8.8",
+    "playwright-core": "1.63.0",
+    "wrangler": "4.135.0"
+  }
+}

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat2Local · 本地文件权限</title><link rel="stylesheet" href="/home.css"><script type="module" src="/home.js"></script></head>
+<body><main><header><strong>Chat2Local</strong><span>chat2local-mcp · 开发预览</span></header>
+<h1>选一个文件夹，<br>让 ChatGPT 读写本机文件。</h1><p class="intro">选择要共享的目录，确认允许读写后自动继续首次连接。已连接的电脑无需重复配对。</p><p id="deviceIdentity" class="muted"></p>
+<div id="message" role="status" aria-live="polite" hidden></div>
+<section aria-labelledby="folderHeading"><div class="heading"><h2 id="folderHeading">允许访问的文件夹</h2><button id="chooseFolder" class="secondary">添加文件夹</button></div>
+<p class="muted">新目录通过“选择并允许读写”明确授权：后续普通修改无需本机逐次审批，覆盖前自动备份。已有目录保留原权限。</p>
+<div id="pickerNotice" class="picker-notice" hidden><div class="heading"><h3>选择文件夹</h3><button id="cancelPicker" class="secondary">取消选择</button></div><p id="pickerMessage" role="status">在本页选择目录，已有连接和权限照常工作。</p><div id="folderBrowser" hidden><div id="browseLocations" class="folder-controls"></div><div class="path-row"><input id="browsePath" aria-label="文件夹位置" placeholder="本机完整路径"><button id="browseGo" class="secondary">打开</button><button id="browseUp" class="secondary">上一级</button></div><div id="browseEntries" aria-label="子文件夹"></div><p id="browseNote" class="muted"></p><p id="folderConsent" class="privacy">仅开放上方选定目录中的文本文件，不包括删除、执行命令或目录外访问。文件内容会经过连接服务和 AI 平台。</p><details id="newFolderOptions"><summary>高级：以只读或逐次确认方式共享</summary><label>新目录权限 <select id="newFolderMode" aria-label="新目录权限"><option value="direct">允许直接读写（自动备份）</option><option value="read-only">仅查看</option><option value="review">每次修改前确认</option></select></label></details><button id="useFolder" disabled>选择并允许读写</button></div></div>
+<div id="folders"><p class="muted">尚未开放任何目录。</p></div>
+<p class="privacy">直接读写仅允许在指定目录内创建、修改文本文件，并在覆盖前备份。不包含删除、执行命令或目录外访问。</p></section>
+<section aria-labelledby="connectionHeading"><h2 id="connectionHeading">ChatGPT 连接状态</h2><p id="connection" role="status">正在读取连接状态…</p>
+<div id="setupActions"><button id="connectChatGPT" disabled>继续连接 ChatGPT</button></div>
+<p id="publication" hidden>公开安装入口尚未发布。维护者测试使用现有 chat2local-mcp 连接，无需另建插件。</p>
+<details id="connectionHelp"><summary>连接遇到问题 / 重新绑定浏览器</summary><p class="muted">只有新账号授权或配对过期时才需要重新绑定。修改目录权限不需要点击连接。</p><button id="repairConnection" class="secondary">重新打开配对页</button><p class="muted">ChatGPT 端使用 <b>chat2local-mcp</b>。新增工具可能需要在该插件详情页刷新工具；不要删除已有连接。</p></details>
+<p class="privacy">文件内容会经过 <span id="relayHost">连接服务</span> 和 AI 平台。ChatGPT 的首次授权与操作确认仍遵循平台设置。</p></section>
+<section id="approvals" hidden><h2>需要确认的修改建议</h2><div id="changes"></div></section>
+<footer><span id="localState">正在读取本机状态…</span><div><button id="pauseAccess" class="text">暂停访问</button><button id="exitApp" class="text">退出程序</button><a href="/developer">维护者诊断</a></div></footer>
+<p class="footnote">关闭这个设置页面不会停止服务。不需要一直留在这里；日常操作仍在 ChatGPT 完成。</p></main></body></html>

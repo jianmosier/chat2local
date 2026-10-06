@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chat2local-relay",
+  "main": "src/relay/worker.mjs",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "PUBLIC_ORIGIN": "https://replace-with-your-relay.workers.dev"
+  },
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "DEVICES", "class_name": "Device" },
+      { "name": "REGISTRY", "class_name": "Registry" }
+    ]
+  },
+  "exports": {
+    "Device": { "type": "durable-object", "storage": "sqlite" },
+    "Registry": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "observability": { "enabled": false }
+}

@@ -1,0 +1,13 @@
+# Optional process-local TLS key-agreement compatibility profile.
+# TLS versions, ciphers, certificate roots and certificate verification are unchanged.
+# Selected only for a proxy proven to reset the default hybrid-group ClientHello.
+nodejs_conf = chat2local_init
+
+[chat2local_init]
+ssl_conf = chat2local_ssl
+
+[chat2local_ssl]
+system_default = chat2local_tls
+
+[chat2local_tls]
+Groups = X25519:P-256

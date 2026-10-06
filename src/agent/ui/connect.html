@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>chat2local · 连接这台电脑</title><link rel="stylesheet" href="/connect.css"><script type="module" src="/connect.js"></script></head>
+<body><main>
+<header><strong>chat2local</strong><span id="device">正在识别本机…</span></header>
+<h1>连接这台电脑，<br>从选择目录开始。</h1>
+<p class="intro">一个插件连接你的电脑。不新建插件，不重置已有身份；接入进度保留在这里。</p>
+<ol class="steps" aria-label="接入进度"><li id="stepFolder">1　选择并授权目录</li><li id="stepConnection">2　检查网页工具与权限</li><li id="stepVerify">3　验证真实读写</li></ol>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<section id="workspace" aria-labelledby="heading">
+<p id="eyebrow" class="eyebrow">这台电脑</p><h2 id="heading">选择要连接的文件夹</h2><p id="explanation">正在读取保存的配置，不会自动更改权限。</p>
+<div id="selected" class="selected" hidden><strong id="selectedLabel"></strong><p id="selectedPath"></p><small id="selectedMode"></small></div>
+<div id="savedFolders" aria-label="已有目录"></div>
+<button id="choose" class="secondary" disabled>选择其他文件夹</button>
+<div id="browser" hidden><div class="browser-top"><strong>本机文件夹</strong><button id="cancelBrowse" class="quiet">取消选择</button></div><div id="places" class="places"></div><div class="pathbar"><input id="path" aria-label="文件夹位置" placeholder="可输入本机完整路径"><button id="go" class="secondary">打开</button><button id="up" class="secondary">上一级</button></div><div id="entries"></div><p id="browseNote" class="muted"></p><p class="consent">下方按钮只授权上方位置框<strong>已加载的这个目录</strong>：允许读取、创建和修改文本，覆盖前备份，不再逐次本机审批。不包括删除、执行命令和目录外访问；文件内容会经过连接服务与 AI 平台。</p><button id="selectFolder" disabled>选择并允许读写</button></div>
+<p id="consent" class="consent" hidden>点击下方按钮，即允许 chat2local 在<strong>上方这一个目录</strong>中读取、创建和修改文本，覆盖前备份。后续普通修改不再要求本机逐次审批。不包括删除、执行命令或目录外访问。文件内容会经过连接服务与 AI 平台。</p>
+<div id="capabilityCheck" hidden><h3>接入能力检查</h3><dl class="capabilities"><dt>本机目录</dt><dd id="capDirectory"></dd><dt>设备通道</dt><dd id="capTransport"></dd><dt>线上服务工具</dt><dd id="capServer"></dd><dt>ChatGPT 已保存/启用</dt><dd id="capSaved"></dd><dt>当前对话工具</dt><dd id="capSession"></dd><dt>最近调用的写权限</dt><dd id="capScope"></dd></dl><small class="muted">服务端提供了工具 ≠ 当前对话加载了工具 ≠ 当前授权允许写入。未检查的项目不会显示已通过。</small></div>
+<button id="primary" disabled>正在检查…</button>
+<a id="goChat" class="primary-link" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer" hidden>复制验证指令并前往 ChatGPT</a>
+<div id="verification" hidden><p id="instructionText">在 ChatGPT 中选原来的 <strong>chat2local</strong>。先确认当前对话的工具和授权，再开始读写验证。</p><details id="promptDetails"><summary>查看或手动复制当前步骤指令</summary><textarea id="prompt" readonly aria-label="网页读写验证指令"></textarea></details><div class="evidence"><span id="created">○ 创建</span><span id="updated">○ 修改并备份</span><span id="readback">○ 读回一致</span></div></div>
+<p id="nextHint" class="muted"></p>
+</section>
+<details id="help"><summary>仅当当前步骤遇到问题</summary><p>目录授权和设备身份不会因重试丢失。网络恢复会沿用原连接，不要重新安装或创建第二个插件。</p><p id="platformHelp">只检查原 chat2local 连接，不重装、不重配目录。服务端工具齐全但当前对话缺少工具时，查看原连接的工具清单及启用状态；在开发模式中刷新后，须确认新增工具实际出现并启用，再重新载入对话。若 files:write 缺失，才处理原连接的 OAuth 权限。平台设置不可由本程序直接读取或静默批准。</p><p id="endpoint" class="muted"></p><button id="retryBinding" class="secondary" disabled>重新打开必要的授权步骤</button><button id="cancelGuide" class="secondary" disabled>结束本轮向导，保留目录权限</button><p><a href="/manage">高级目录管理</a> · <a href="/developer">维护者诊断</a></p></details>
+<footer><span id="localStatus">正在读取本机状态</span><button id="pause" class="quiet" disabled>暂停访问</button><button id="exit" class="quiet" disabled>退出程序</button></footer>
+<p class="footnote">页面关闭不会停止已授权的访问。要停止访问，请暂停或退出。首次完成后日常工作只在 ChatGPT 中进行。</p>
+</main></body></html>

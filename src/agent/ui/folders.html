@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>共享文件夹 · chat2local</title><link rel="stylesheet" href="/folders.css"><script type="module" src="/folders.js"></script></head><body><main>
+<header><a class="brand" href="/folders">chat2local</a><span id="device">正在识别这台电脑</span></header>
+<section class="hero"><p class="eyebrow">这台电脑 · 日常管理</p><h1>管理共享文件夹</h1><p>保留原连接。批量选择文件夹，一次确认；不重新安装、配对或输入安装密码。</p></section>
+<p id="message" role="status" aria-live="polite">正在核对当前共享范围…</p>
+<section class="card"><label for="connection">当前连接</label><select id="connection" disabled></select><div id="shared"></div></section>
+<section class="card"><h2>终端执行</h2><p>默认关闭。启用后命令以当前系统用户权限执行，<strong>不是目录沙箱</strong>：可能修改或删除目录外文件、访问网络。不支持交互式终端或提权提示。</p><div id="terminal-roots"></div><p class="muted">还需要原 ChatGPT 连接明确授予 terminal:execute；已有文件权限不会自动升级。</p></section>
+<section class="card" id="editor"><h2>添加文件夹</h2><div class="pathbar"><input id="path" aria-label="文件夹路径" placeholder="输入路径或在下方浏览"><button id="browse" type="button">打开</button><button id="up" class="secondary" type="button">上一级</button></div><div id="places" class="actions"></div><div id="entries"></div><button id="add-current" class="secondary" disabled>将当前文件夹加入待授权列表</button><p class="muted">可以连续选择多个目录。选择本身不会开放访问。</p><div id="pending"></div><button id="prepare" disabled>核对本次新增范围</button></section>
+<section class="card" id="review" hidden><p class="eyebrow">尚未授权</p><h2>确认这次目录变更</h2><p id="target"></p><div id="summary"></div><p>仅开放下列目录；读写模式允许创建和修改文本，覆盖前备份。不删除文件，不执行命令，不开放整台电脑。</p><button id="confirm">确认并保存共享范围</button><p class="muted">文件内容会经过你自己的连接服务及 AI 平台。已有目录和其他电脑保持不变。</p></section>
+<section class="card success" id="done" hidden><p class="eyebrow">已生效</p><h2>共享目录已更新</h2><div id="result"></div><p>原连接现在可以访问这些目录。已有共享保持不变。</p><button id="another">继续管理文件夹</button><a class="button secondary" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">返回 ChatGPT</a></section>
+<footer>关闭页面不会停止已授权的连接。权限变更只针对本次明确确认的目录。</footer>
+</main></body></html>
