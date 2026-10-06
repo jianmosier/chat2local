@@ -68,7 +68,7 @@ export class NativeAccountOnboarding {
     return config;
   }
   policy(local, config = this.current(local)) {
-    return hash({ deviceId: local.deviceId, origin: local.origin, paused: config.paused, roots: config.roots, accountRoots: (config.accountRoots || []).filter(r => r.intentId !== local.flowId), selection: local.reusedRoots || local.selections || local.selection });
+    return hash({ deviceId: local.deviceId, origin: local.origin, paused: config.paused, roots: config.roots, accountRoots: (config.accountRoots || []).filter(r => r.intentId !== local.flowId), ...(local.accessProfile === 'project' ? { accessProfile: 'project', terminalGrants: (config.terminalGrants || []).filter(g => !(local.selections || []).some(r => r.id === g.rootId)) } : {}), selection: local.reusedRoots || local.selections || local.selection });
   }
   async assertCurrent(local, intent) {
     if (intent.intentId !== local.flowId || intent.policyDigest !== local.policyDigest || this.policy(local) !== local.policyDigest) throw fail('所选目录或权限发生变化，没有沿用旧确认。', 409);
@@ -133,7 +133,18 @@ export class NativeAccountOnboarding {
         }
         const additions = roots.filter(root => !saved.some(r => r.id === root.id));
         if (saved.length + additions.length > 100) throw fail('已达到共享目录数量限制。', 429);
-        if (additions.length) await this.saveConfig({ ...config, accountRoots: [...saved, ...additions] });
+        let terminalGrants;
+        if (local.accessProfile === 'project') {
+          if (local.reusedRoots || roots.some(r => r.writeMode !== 'direct')) throw fail('完整共享范围不匹配。', 403);
+          terminalGrants = [...(config.terminalGrants || [])];
+          for (const root of roots) {
+            const grant = { connectionId: intent.connectionId, rootId: root.id, resource: intent.resource, enabled: true };
+            const prior = terminalGrants.find(g => g.rootId === root.id && g.connectionId === intent.connectionId);
+            if (prior && JSON.stringify(prior) !== JSON.stringify(grant)) throw fail('终端授权已变化，未覆盖原设置。', 409);
+            if (!prior) terminalGrants.push(grant);
+          }
+        }
+        if (additions.length || (terminalGrants && terminalGrants.length !== (config.terminalGrants || []).length)) await this.saveConfig({ ...config, accountRoots: [...saved, ...additions], ...(terminalGrants ? { terminalGrants } : {}) });
         // Authenticated activation message is sent only AFTER the durable local save.
         return 'durably-activated-native-flow';
       }),
@@ -142,7 +153,7 @@ export class NativeAccountOnboarding {
   async view(local) {
     const record = await this.store.readPrivateRecord('onboarding-intent-' + local.flowId);
     const status = record ? this.coordinator(local).view(record) : { requiresConsent: false, connected: false, phase: 'choose-folder', confirmationCount: 0 };
-    return { terminalRequested: local.context?.scopes.includes('terminal:execute') === true, flowId: local.flowId, displayName: local.context?.displayName, clientName: local.context?.clientName, callbackOrigin: local.context?.callbackOrigin, deviceName: local.deviceName, reuseExisting: Boolean(local.reusedRoots), selections: (local.reusedRoots || local.selections)?.map(r => ({ label: r.label, path: r.path, mode: r.writeMode })), selection: local.selection ? { label: local.selection.label, path: local.selection.path, mode: local.selection.writeMode } : null, snapshotDigest: record?.intent.snapshotDigest || null, ...status, finishUrl: status.connected ? `${local.origin}${this.cloudPrefix}/finish?flow=${local.flowId}` : null };
+    return { ...(local.accessProfile === 'project' ? { accessProfile: 'project' } : {}), terminalRequested: local.accessProfile === 'project' || local.context?.scopes.includes('terminal:execute') === true, flowId: local.flowId, displayName: local.context?.displayName, clientName: local.context?.clientName, callbackOrigin: local.context?.callbackOrigin, deviceName: local.deviceName, reuseExisting: Boolean(local.reusedRoots), selections: (local.reusedRoots || local.selections)?.map(r => ({ label: r.label, path: r.path, mode: r.writeMode })), selection: local.selection ? { label: local.selection.label, path: local.selection.path, mode: local.selection.writeMode } : null, snapshotDigest: record?.intent.snapshotDigest || null, ...status, finishUrl: status.connected ? `${local.origin}${this.cloudPrefix}/finish?flow=${local.flowId}` : null };
   }
   async handle(action, input, cookies) {
     if (!['start','choose'].includes(action)) return this.perform(action, input, cookies);

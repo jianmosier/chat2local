@@ -41,6 +41,7 @@ export class PrivateInstance {
    */
   async manage({ action, device, input = {} }) {
     if (!isAccountId(device?.deviceId) || !isDigest(device?.epoch) || !isDigest(device?.keyHash)) throw fail('Authenticated device required.', 401);
+    if (action === 'remove') return this.removeShares({ device, input });
     if (!['connections', 'start'].includes(action)) throw fail('Unknown folder-management action.', 404);
     exactFields(input, action === 'connections' ? [] : ['flowId', 'connectionId', 'sessionSecret']);
     if (action === 'start' && (!isAccountId(input.flowId) || !isAccountId(input.connectionId) || !isDigest(input.sessionSecret))) throw fail('Invalid folder-management intent.', 400);
@@ -54,12 +55,13 @@ export class PrivateInstance {
         const connection = await tx.get('accounts:v3:connection:' + connectionId);
         if (!connection || connection.revoked || connection.accountId !== owner.accountId || connection.resource !== this.resource) continue;
         const roots = connection.shares.filter(s => s.deviceId === device.deviceId && s.deviceEpoch === device.epoch).map(s => ({ rootId: s.rootId, mode: s.mode }));
-        if (!roots.length) continue;
+        const membership = await tx.get(key('device-link', device.deviceId + ':' + connectionId));
+        if (!roots.length && !(membership?.deviceEpoch === device.epoch && membership.connectionEpoch === connection.epoch)) continue;
         const descriptor = await tx.get(key('client', connectionId));
         if (!descriptor?.redirectUri) continue;
         connections.push({ connection, roots, descriptor });
       }
-      if (action === 'connections') return { connections: connections.map(({ connection: c, roots, descriptor: d }) => ({ connectionId: c.id, clientId: c.clientId, clientName: d.clientName, callbackOrigin: new URL(d.redirectUri).origin, scopes: c.scopes, roots })) };
+      if (action === 'connections') return { connections: connections.map(({ connection: c, roots, descriptor: d }) => ({ connectionId: c.id, revision: c.revision, clientId: c.clientId, clientName: d.clientName, callbackOrigin: new URL(d.redirectUri).origin, scopes: c.scopes, roots })) };
       const matched = connections.find(c => c.connection.id === input.connectionId);
       if (!matched) throw fail('This computer is not shared with the selected connection.', 403);
       const { connection: c, descriptor: d } = matched;
@@ -75,6 +77,38 @@ export class PrivateInstance {
         await tx.put(key('flow', flow.id), flow);
       }
       return { flowId: flow.id, management: true, accountId: flow.accountId, displayName: new URL(this.resource).host, clientId: c.clientId, clientName: d.clientName, resource: this.resource, deviceId: device.deviceId, deviceEpoch: device.epoch, scopes: flow.scopes, requestDigest: await sha256(JSON.stringify(flow.authRequest)), connectionId: c.id, callbackOrigin: new URL(d.redirectUri).origin };
+    });
+  }
+  async removeShares({ device, input }) {
+    exactFields(input, ['requestId', 'connectionId', 'rootIds', 'expectedRevision']);
+    if (!isAccountId(input.requestId) || !isAccountId(input.connectionId) || !Number.isSafeInteger(input.expectedRevision) || !Array.isArray(input.rootIds) || !input.rootIds.length || input.rootIds.length > 100 || new Set(input.rootIds).size !== input.rootIds.length || input.rootIds.some(r => !/^[a-f0-9-]{36}$/.test(r))) throw fail('Invalid removal snapshot.', 400);
+    const owner = await this.owner();
+    const fingerprint = await sha256(JSON.stringify({ ...input, device }));
+    return this.storage.transaction(async tx => {
+      const registration = await tx.get('device:' + device.deviceId);
+      if (registration !== true && !(registration?.kind === 'private-instance' && registration.keyHash === device.keyHash)) throw fail('Device is no longer registered.', 403);
+      const c = await tx.get('accounts:v3:connection:' + input.connectionId);
+      const deviceOwner = await tx.get('accounts:v3:device-owner:' + device.deviceId);
+      if (!c || c.accountId !== owner.accountId || c.resource !== this.resource || !deviceOwner || deviceOwner.accountId !== owner.accountId || deviceOwner.epoch !== device.epoch) throw fail('Removal does not belong to this device and connection.', 403);
+      const saved = await tx.get(key('removal', input.requestId));
+      if (saved) {
+        if (saved.fingerprint !== fingerprint) throw fail('Removal request changed.', 409);
+        return saved.result;
+      }
+      const targets = c.shares.filter(s => s.deviceId === device.deviceId && s.deviceEpoch === device.epoch && input.rootIds.includes(s.rootId));
+      if (!c.revoked && targets.length && c.revision !== input.expectedRevision) throw fail('Shared scope changed after review; local access remains revoked.', 409);
+      const retained = await tx.list({ prefix: key('removal'), limit: 513 });
+      if (retained.size >= 512) throw fail('Removal receipt capacity reached.', 429);
+      if (targets.length) {
+        c.shares = c.shares.filter(s => !targets.includes(s)); c.revision++;
+        await tx.put('accounts:v3:connection:' + c.id, c);
+        // Keep this already proven device's management link, not file access.
+        // A zero-folder device can later add a folder with fresh local consent.
+        await tx.put(key('device-link', device.deviceId + ':' + c.id), { deviceEpoch: device.epoch, connectionEpoch: c.epoch });
+      }
+      const result = { requestId: input.requestId, connectionId: c.id, rootIds: input.rootIds, removed: true, revision: c.revision, filesDeleted: false };
+      await tx.put(key('removal', input.requestId), { fingerprint, result });
+      return result;
     });
   }
   async createInvitation(input, stable = null) {

@@ -11,7 +11,7 @@ export function assertUpgradeIdle(state, instanceId) {
 }
 function request(session, route, method = 'GET') {
   return new Promise((resolve, reject) => {
-    const req = http.request(session.origin + route, { method, headers: { 'X-Chat2Local-Token': session.token, ...(method === 'POST' ? { Origin: session.origin, 'Content-Type': 'application/json', 'Content-Length': 2 } : {}) }, timeout: 3000 }, response => {
+    const req = http.request(session.origin + route, { method, agent: false, headers: { 'X-Chat2Local-Token': session.token, ...(method === 'POST' ? { Origin: session.origin, 'Content-Type': 'application/json', 'Content-Length': 2 } : {}) }, timeout: 3000 }, response => {
       let text = ''; response.setEncoding('utf8');
       response.on('data', chunk => { text += chunk; if (text.length > 131072) response.destroy(Error('Local status too large.')); });
       response.on('error', reject);
@@ -33,13 +33,17 @@ export async function prepareUpgrade(version, { store = new Store(), call = requ
   if (state.version === version) return { stopped: false, verify: async () => {} };
   assertUpgradeIdle(state, session.instanceId);
   const before = fingerprint(await store.load());
-  const result = await call(session, '/api/shutdown', 'POST');
-  if (result.ok !== true) throw Error('Graceful update shutdown was not confirmed.');
+  let result;
+  try { result = await call(session, '/api/shutdown', 'POST'); }
+  catch (error) { if (!['ECONNRESET','EPIPE'].includes(error.code)) throw error; }
+  // A lost shutdown response is uncertain, not a failed/finished shutdown.
+  // Observe fresh connections below; never replay POST or launch on reset alone.
+  if (result && result.ok !== true) throw Error('Graceful update shutdown was not confirmed.');
   let closed = false;
   for (let attempt = 0; attempt < 30; attempt++) {
     await wait(150);
     try { await call(session, '/api/status'); }
-    catch (error) { if (error.code === 'ECONNREFUSED') { closed = true; break; } throw error; }
+    catch (error) { if (error.code === 'ECONNREFUSED') { closed = true; break; } if (!['ECONNRESET','EPIPE'].includes(error.code)) throw error; }
   }
   if (!closed) throw Error('Old controller is still present. No duplicate process was launched.');
   if (fingerprint(await store.load()) !== before) throw Error('Configuration changed while preparing update. Review before continuing.');

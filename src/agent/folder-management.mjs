@@ -5,6 +5,8 @@ import { approveRoot } from './files.mjs';
 import { rootPermission, validateWriteMode } from './permissions.mjs';
 import { exactFields, isAccountId, checkedScopes } from '../shared/connection-access.mjs';
 import { readLimited } from '../shared/protocol.mjs';
+import { annotateCoverage } from '../shared/share-tree.mjs';
+import { terminalPermission } from '../shared/terminal-permission.mjs';
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const digest = input => createHash('sha256').update(JSON.stringify(input)).digest('hex');
@@ -17,7 +19,7 @@ export class FolderManagement extends NativeAccountOnboarding {
   constructor(options) { super({ ...options, profile: 'instance' }); this.managementWork = new Map(); }
   async managementCall(action, input = {}) {
     const identity = this.getIdentity();
-    if (!identity || this.getConfig().paused) throw fail('请先恢复这台电脑的原连接；没有开放新目录。');
+    if (!identity || (this.getConfig().paused && !['remove','connections'].includes(action))) throw fail('请先恢复这台电脑的原连接；没有开放新目录。');
     await this.prepareNetwork(identity.origin);
     let response;
     try { response = await this.request(`${identity.origin}/instance/manage/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${identity.deviceKey}` }, body: JSON.stringify({ deviceId: identity.deviceId, input }), redirect: 'error', signal: AbortSignal.timeout(15000) }); }
@@ -31,14 +33,14 @@ export class FolderManagement extends NativeAccountOnboarding {
     const config = this.getConfig();
     if (!Array.isArray(value.connections) || value.connections.length > 20) throw fail('连接列表不匹配。');
     // A remote entry alone cannot create a new local trust relationship.
-    return { connections: value.connections.filter(c => isAccountId(c.connectionId) && Array.isArray(c.roots) && c.roots.some(s => [...config.roots, ...(config.accountRoots || []).filter(r => r.connectionId === c.connectionId)].some(r => r.id === s.rootId))).map(c => ({ ...c, roots: c.roots.map(s => {
+    return { connections: value.connections.filter(c => isAccountId(c.connectionId) && Array.isArray(c.roots) && (c.roots.some(s => [...config.roots, ...(config.accountRoots || []).filter(r => r.connectionId === c.connectionId)].some(r => r.id === s.rootId)) || (config.managedConnections || []).some(m => m.connectionId === c.connectionId && m.deviceId === this.getIdentity()?.deviceId && m.origin === this.getIdentity()?.origin))).map(c => ({ ...c, roots: c.roots.map(s => {
       const local = [...config.roots, ...(config.accountRoots || [])].find(r => r.id === s.rootId);
-      return { ...s, path: local?.path || null, label: local?.label || null, locallyPresent: Boolean(local) };
-    }) })) };
+      return { ...s, path: local?.path || null, label: local?.label || null, locallyPresent: Boolean(local), ...terminalPermission({ grants: config.terminalGrants || [], connectionId: c.connectionId, rootId: s.rootId, resource: this.getIdentity().origin + '/mcp', scopes: c.scopes, mode: s.mode, available: Boolean(local) }) };
+    }) })).map(c => ({ ...c, roots: annotateCoverage(c.roots, process.platform) })) };
   }
   async execute(action, input) {
     if (action === 'connections') { exactFields(input, []); return this.connections(); }
-    exactFields(input, action === 'prepare' ? ['requestId', 'connectionId', 'folders'] : action === 'confirm' ? ['requestId', 'snapshotDigest', 'confirmation'] : ['requestId']);
+    exactFields(input, action === 'prepare' ? ['requestId', 'connectionId', 'folders', 'accessProfile'] : action === 'confirm' ? ['requestId', 'snapshotDigest', 'confirmation'] : ['requestId']);
     if (!['prepare', 'confirm', 'status', 'resume'].includes(action) || !isAccountId(input.requestId)) throw fail('目录管理请求无效。', 400);
     if (action === 'status') return this.inspect(input.requestId);
     const previous = this.managementWork.get(input.requestId);
@@ -64,11 +66,17 @@ export class FolderManagement extends NativeAccountOnboarding {
   async performManagement(action, input) {
     if (action !== 'prepare') {
       const local = await this.loadManagement(input.requestId);
-      if (action === 'confirm') await this.coordinator(local).confirm(local.flowId, { snapshotDigest: input.snapshotDigest, confirmation: input.confirmation });
+      if (action === 'confirm') {
+        const expected = local.accessProfile === 'project' ? 'allow-project-files-and-terminal-v1' : 'allow-shared-folders-v1';
+        if (input.confirmation !== expected) throw fail('请确认本次显示的共享权限。', 403);
+        await this.coordinator(local).confirm(local.flowId, { snapshotDigest: input.snapshotDigest, confirmation: 'allow-shared-folders-v1' });
+      }
       else await this.coordinator(local).resume(local.flowId);
       return this.inspect(local.flowId);
     }
     if (!isAccountId(input.connectionId) || !Array.isArray(input.folders) || input.folders.length < 1 || input.folders.length > 20) throw fail('请选择 1–20 个具体文件夹。', 400);
+    if (input.accessProfile !== undefined && input.accessProfile !== 'project') throw fail('共享类型无效。', 400);
+    if (input.accessProfile === 'project' && input.folders.some(f => f.mode !== 'direct')) throw fail('完整共享需要文件读写权限。', 400);
     for (const folder of input.folders) {
       exactFields(folder, ['path', 'mode']);
       if (typeof folder.path !== 'string' || folder.path.length > 4096) throw fail('文件夹路径无效。', 400);
@@ -98,7 +106,7 @@ export class FolderManagement extends NativeAccountOnboarding {
           const stat = await fs.stat(checked.path, { bigint: true });
           selections.push({ ...checked, ...rootPermission(folder.mode), dev: String(stat.dev), ino: String(stat.ino) });
         }
-        const local = { profile: 'instance', management: true, managementRequestDigest: requestDigest, flowId: input.requestId, origin: identity.origin, deviceId: identity.deviceId, deviceName: this.deviceName(), sessionSecret: randomBytes(32).toString('hex'), revision: this.getRevision(), until: Date.now() + 86400000, selections };
+        const local = { profile: 'instance', management: true, ...(input.accessProfile === 'project' ? { accessProfile: 'project' } : {}), managementRequestDigest: requestDigest, flowId: input.requestId, origin: identity.origin, deviceId: identity.deviceId, deviceName: this.deviceName(), sessionSecret: randomBytes(32).toString('hex'), revision: this.getRevision(), until: Date.now() + 86400000, selections };
         local.policyDigest = this.policy(local);
         await this.store.savePrivateRecord('onboarding-flow-' + local.flowId, local);
         return local;

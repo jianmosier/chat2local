@@ -225,29 +225,62 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   assert.equal((await post(origin + '/instance/manage/connections', { deviceId: identityC.deviceId, input: {} }, { Authorization: 'Bearer ' + tokens.access_token })).status, 401);
   await pageC.goto(appC.origin + '/folders#' + appC.token);
   await pageC.locator('#connection option').waitFor({ state: 'attached' });
+  await pageC.locator('#open-add').click();
   await pageC.locator('#path').fill(base); await pageC.locator('#browse').click();
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-A', exact: true }).check();
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-B', exact: true }).check();
-  await pageC.getByRole('combobox', { name: '目录权限 ' + batchB, exact: true }).selectOption('read-only');
-  await pageC.locator('#prepare').click(); await pageC.locator('#review').waitFor({ state: 'visible' });
+  assert.equal(await pageC.locator('#pending select').count(), 0);
+  assert.match(await pageC.locator('#editor .consent').innerText(), /目录外文件/);
+  assert.equal((await storeC.load()).config.terminalGrants?.length || 0, 0);
+  await pageC.route('**/api/shares/confirm', async route => {
+    const body = route.request().postDataJSON();
+    assert.equal(body.confirmation, 'allow-project-files-and-terminal-v1');
+    const rejected = await post(appC.origin + '/api/shares/confirm', { ...body, confirmation: 'allow-shared-folders-v1' }, { Origin: appC.origin, 'X-Chat2Local-Token': appC.token });
+    assert.equal(rejected.status, 403, 'A former file-only consent cannot approve a complete project');
+    assert.equal((await storeC.load()).config.terminalGrants?.length || 0, 0);
+    await route.continue();
+  });
   assert.equal((await ok('list_roots', { deviceId: identityC.deviceId })).length, 2);
   await pageC.screenshot({ path: '.artifacts/folder-management-batch.png', fullPage: true });
-  await pageC.locator('#confirm').click(); await pageC.locator('#done').waitFor({ state: 'visible' });
+  // One labelled decision covers the visibly selected batch. The UI verifies
+  // prepared paths/modes match this exact decision before sending one consent.
+  await pageC.locator('#prepare').click(); await pageC.locator('#done').waitFor({ state: 'visible' });
   assert.equal(managementConfirms, 1); assert.equal(installerCalls, 0);
   assert.equal(await pageC.locator('input[type=password]').count(), 0);
   const managed = await ok('list_roots', { deviceId: identityC.deviceId });
   assert.equal(managed.length, 4);
   assert.ok(managed.some(r => r.id === rootC.id));
-  const writable = managed.find(r => r.label === 'Batch-A'), readonly = managed.find(r => r.label === 'Batch-B');
-  assert.equal(writable.writeMode, 'direct'); assert.equal(readonly.writeMode, 'read-only');
+  const writable = managed.find(r => r.label === 'Batch-A'), second = managed.find(r => r.label === 'Batch-B');
+  assert.equal(writable.writeMode, 'direct'); assert.equal(second.writeMode, 'direct');
+  for (const root of [writable, second]) {
+    assert.equal(root.terminalLocalEnabled, true);
+    assert.equal(root.terminalScopeGranted, false);
+    assert.equal(root.terminalAllowed, false, 'Complete local consent does not enlarge an old OAuth token');
+  }
+  assert.equal((await storeC.load()).config.terminalGrants.length, 2);
+  assert.equal(managed.find(r => r.id === rootC.id).terminalLocalEnabled, false, 'Existing file-only roots were not upgraded');
   const batchArgs = { deviceId: identityC.deviceId, rootId: writable.id, path: 'batch.txt' };
   assert.equal((await ok('write_file', { ...batchArgs, content: 'One batch consent', expectedHash: null })).status, 'written');
   assert.equal((await ok('read_file', batchArgs)).content, 'One batch consent');
-  assert.equal((await call('write_file', { ...batchArgs, rootId: readonly.id, content: 'must fail', expectedHash: null })).isError, true);
+  assert.equal((await call('terminal_execute', { deviceId: identityC.deviceId, rootId: writable.id, requestId: '11111111-1111-4111-8111-111111111111', command: 'must-not-execute' })).isError, true);
   assert.deepEqual((await storeC.load()).secrets.identity, retainedIdentityC);
   assert.equal((await data(await owner('connections'))).connections.length, 1);
   assert.equal(await pageC.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
   await pageC.screenshot({ path: '.artifacts/folder-management-complete.png', fullPage: true });
+  // Revoke one live shared folder through the native UI API. The SAME old
+  // token must immediately lose file access; unrelated shares and files stay.
+  const removePost = (action, body) => post(appC.origin + '/api/shares/' + action, body, { Origin: appC.origin, 'X-Chat2Local-Token': appC.token });
+  assert.equal((await post(appC.origin + '/api/shares/remove-prepare', { connectionId: originalConnection, rootId: writable.id }, { Origin: appC.origin })).status, 401);
+  const removal = await data(await removePost('remove-prepare', { connectionId: originalConnection, rootId: writable.id }));
+  assert.equal((await ok('list_roots', { deviceId: identityC.deviceId })).length, 4);
+  const removed = await data(await removePost('remove-confirm', { requestId: removal.requestId, snapshotDigest: removal.snapshotDigest, confirmation: 'remove-shares-keep-files-v1' }));
+  assert.equal(removed.localRevoked, true); assert.equal(removed.cloudSynced, true);
+  assert.equal((await call('read_file', batchArgs)).isError, true);
+  assert.equal((await call('write_file', { ...batchArgs, content: 'forbidden', expectedHash: null })).isError, true);
+  assert.equal((await ok('list_roots', { deviceId: identityC.deviceId })).length, 3);
+  assert.equal(await fs.readFile(path.join(batchA, 'batch.txt'), 'utf8'), 'One batch consent');
+  assert.equal((await storeC.load()).config.terminalGrants?.some(g => g.rootId === writable.id) || false, false);
+  assert.equal((await ok('read_file', cArgs)).content, 'Old computers are offline');
   // The original browser can renew the SAME client/resource/scope without a
   // second folder picker or private-instance consent. No Google cookie involved.
   const renewedQuery = new URLSearchParams(query); renewedQuery.set('state', secret()); renewedQuery.set('scope', 'files:read');

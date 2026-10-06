@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Store, pickFolder, openBrowser, setStartup, startupAvailable } from './store.mjs';
+import { ManagementSessions } from './management-session.mjs';
 import { platformInfo, sameDirectory } from './platform.mjs';
 import { FileService, approveRoot } from './files.mjs';
 import { rootWriteMode, rootPermission, validateWriteMode } from './permissions.mjs';
@@ -13,6 +14,8 @@ import { FolderPicker } from './folder-picker.mjs';
 import { BrowserRecovery, recoveryNavigation, recoveryPage, recoveryScript } from './browser-recovery.mjs';
 import { NativeAccountOnboarding, pickAccountFolder } from './account-onboarding.mjs';
 import { FolderManagement } from './folder-management.mjs';
+import { ShareRemoval } from './share-removal.mjs';
+import { terminalPermission } from '../shared/terminal-permission.mjs';
 import { TerminalService, TERMINAL_CONFIRMATION } from './terminal.mjs';
 import { authorizationReturn } from '../shared/authorization-navigation.mjs';
 import { parseInstanceInvitation } from '../shared/instance-invitation.mjs';
@@ -106,8 +109,7 @@ export async function startController(options = {}) {
     if (connectionAccess !== undefined && connectionAccess?.resource !== `${secrets.identity?.origin}/mcp`) throw new Error('Connection access belongs to a different relay.');
     const result = name.startsWith('terminal_') ? await terminal.invoke(name, args, connectionAccess) : await files.invoke(name, args, connectionAccess);
     if (name === 'list_roots' && Array.isArray(result)) for (const root of result) {
-      const enabled = Boolean(connectionAccess && connectionAccess.scopes.includes('terminal:execute') && root.writeMode === 'direct' && (config.terminalGrants || []).some(g => g.enabled && g.rootId === root.id && g.connectionId === connectionAccess.connectionId && g.resource === connectionAccess.resource));
-      root.terminalAllowed = enabled; root.terminalSandboxed = false;
+      Object.assign(root, terminalPermission({ grants: config.terminalGrants, connectionId: connectionAccess?.connectionId, resource: connectionAccess?.resource, rootId: root.id, mode: root.writeMode, scopes: connectionAccess?.scopes, available: Boolean(connectionAccess) }));
     }
     lastRemoteCallAt = new Date().toISOString();
     const root = config.roots.find(item => item.id === config.connectionGuide?.rootId);
@@ -179,6 +181,9 @@ export async function startController(options = {}) {
   const accountOnboarding = createNativeOnboarding('account');
   const instanceOnboarding = createNativeOnboarding('instance');
   const folderManagement = new FolderManagement({ store, getConfig: () => config, getIdentity: () => secrets.identity, getRevision: () => config.accountPolicyRevision || 0, deviceName: () => deviceInfo().name, saveConfig, serial, prepareNetwork: origin => network.prepare(origin), allowLocal: options.allowLocalRelay === true, ...(options.accountFetch ? { request: options.accountFetch } : {}) });
+  const shareRemoval = new ShareRemoval({ management: folderManagement, getConfig: () => config, getIdentity: () => secrets.identity, serial, changePolicy, saveConfig, stopJobs: async (connectionId, rootIds) => {
+    await Promise.all([...terminal.jobs.values()].filter(job => job.record.connectionId === connectionId && rootIds.includes(job.record.rootId)).map(job => terminal.stop(job, 'cancelled')));
+  } });
   const demoDir = options.demoDir ?? path.join(path.dirname(store.directory), 'Chat2LocalDemo');
   const connectionState = () => guideView(config, { device: deviceInfo(), bridge: bridge.state, setup: setup.info, setupActive: Boolean(setup.active), warning: guideWarning, capabilities: readiness.view(secrets.identity, config.connectionGuide?.id) });
   const status = () => {
@@ -383,6 +388,7 @@ export async function startController(options = {}) {
     }
   }
   let origin;
+  const managementSessions = new ManagementSessions({ store, binding: () => JSON.stringify([origin, config.installationId, secrets.identity?.origin || '', secrets.identity?.deviceId || '', secrets.identity?.deviceKey || '']) });
   const server = http.createServer({ maxHeaderSize: 8192, requestTimeout: 15_000, headersTimeout: 10_000, keepAliveTimeout: 3000 }, (request, response) => {
     const send = (code, data, type = 'application/json', extraHeaders = {}) => {
       if (response.destroyed || response.writableEnded) return;
@@ -447,16 +453,32 @@ export async function startController(options = {}) {
         return;
       }
       if (route.startsWith('/api/')) {
-        if (!matchesSecret(request.headers['x-chat2local-token'], token)) throw failure(401, 'Local control token required. Reopen the app using its launcher.');
+        const launcherAuthenticated = matchesSecret(request.headers['x-chat2local-token'], token);
+        if (!launcherAuthenticated && !await managementSessions.accepts(request)) throw failure(401, 'Local control session required. Open the installed Chat2Local launcher.');
         if (route === '/api/status' && request.method === 'GET') { send(200, status()); return; }
         if (route === '/api/guide' && request.method === 'GET') { send(200, connectionState()); return; }
         if (request.method !== 'POST') throw failure(405, 'POST required.');
         if (request.headers.origin !== origin) throw failure(403, 'Same-origin confirmation required.');
         const value = await bodyJson(request);
+        if (route === '/api/management/session') {
+          fields(value, []);
+          const session = await managementSessions.establish(request.headers.cookie, launcherAuthenticated);
+          send(200, { ready: true, expiresAt: session.expiresAt }, 'application/json', { 'Set-Cookie': session.cookie }); return;
+        }
+        if (route === '/api/management/startup') {
+          fields(value, ['enabled']); boolean(value.enabled);
+          // Only the installed current application may be configured. The browser
+          // cannot provide an executable, arguments, user, or system-wide service.
+          send(200, await serial(() => mutate('startup', value))); return;
+        }
+        if (route === '/api/management/logout') {
+          fields(value, []);
+          send(200, { cleared: true }, 'application/json', { 'Set-Cookie': await managementSessions.logout(request.headers.cookie) }); return;
+        }
         if (route === '/api/terminal/permissions') {
           fields(value, []);
           const { connections } = await folderManagement.connections();
-          send(200, { connections: connections.map(c => ({ ...c, roots: c.roots.map(r => ({ ...r, terminalAllowed: (config.terminalGrants || []).some(g => g.enabled && g.connectionId === c.connectionId && g.rootId === r.rootId) })) })), sandboxed: false }); return;
+          send(200, { connections: connections.map(c => ({ ...c, roots: c.roots.map(r => ({ ...r, ...terminalPermission({ grants: config.terminalGrants, connectionId: c.connectionId, resource: secrets.identity.origin + '/mcp', rootId: r.rootId, mode: r.mode, scopes: c.scopes, available: r.locallyPresent }) })) })), sandboxed: false }); return;
         }
         if (route === '/api/terminal/set-permission') {
           fields(value, ['connectionId','rootId','enabled','confirmation']); boolean(value.enabled);
@@ -473,6 +495,9 @@ export async function startController(options = {}) {
             await changePolicy({ ...config, terminalGrants: grants });
           });
           send(200, { saved: true, enabled: value.enabled, oauthScopeGranted: selected.scopes.includes('terminal:execute'), sandboxed: false }); return;
+        }
+        if (['/api/shares/remove-prepare','/api/shares/remove-confirm','/api/shares/removals'].includes(route)) {
+          send(200, await shareRemoval.execute(route.slice('/api/shares/'.length), value)); return;
         }
         if (route.startsWith('/api/shares/')) {
           // Network work runs outside the policy queue; each durable local
@@ -552,8 +577,16 @@ export async function startController(options = {}) {
     await store.saveSession({ origin, token, instanceId, pid: process.pid });
     if (secrets.identity) bridge.start(secrets.identity);
   } catch (error) { await new Promise(resolve => server.close(resolve)); throw error; }
+  let removalSyncBusy = false;
+  const removalSyncTimer = setInterval(() => {
+    if (closing || removalSyncBusy || !(config.shareRemovals || []).length) return;
+    removalSyncBusy = true;
+    void shareRemoval.flush().catch(() => {}).finally(() => { removalSyncBusy = false; });
+  }, 10000);
+  removalSyncTimer.unref();
   closeController = async () => {
     if (closing) return;
+    clearInterval(removalSyncTimer);
     closing = true; picker.cancel(); setup.cancel(); bridge.stop(); files.cancelPending('Agent stopped.'); await terminal.close();
     await tail;
     network.close();

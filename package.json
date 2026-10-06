@@ -1,6 +1,6 @@
 {
   "name": "chat2local",
-  "version": "0.1.0-alpha.19",
+  "version": "0.1.0-alpha.23",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -14,6 +14,7 @@
     "setup": "node --use-env-proxy scripts/setup-selfhost.mjs",
     "manage": "node scripts/launch.mjs --manage",
     "build:public": "node scripts/build-public.mjs",
+    "test:ui": "node --test --test-concurrency=1 tests/folders-ui.test.mjs tests/private-instance-http.test.mjs",
     "test:management": "node --test --test-concurrency=1 tests/public-release.test.mjs tests/private-instance-http.test.mjs tests/existing-connection.test.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "test:reconnect": "node --test --test-concurrency=1 tests/existing-connection.test.mjs tests/existing-connection-http.test.mjs",

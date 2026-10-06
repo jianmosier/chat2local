@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline/promises';
 import { Store, defaultStateDir } from '../src/agent/store.mjs';
 import { relayOrigin, VERSION } from '../src/shared/protocol.mjs';
 import { buildPortable } from './build-portable.mjs';
+import { releaseTarget, packageNameFor } from './release-targets.mjs';
 import { installPortable } from './install-portable.mjs';
 import { joinInvitation } from './join-instance.mjs';
 import { passwordSetup } from './setup-installer-password.mjs';
@@ -40,7 +41,7 @@ export async function npmEntry() {
 async function save(file, value) { const temp = file + '.next'; await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 }); await fs.rename(temp, file); }
 async function localPackage() {
   const target = `${process.platform}-${process.arch}`;
-  const name = `Chat2Local-${target}-public`;
+  const name = packageNameFor(target, `${releaseTarget(target).prefix}-${VERSION.replaceAll('.', '-')}-public`);
   const directory = path.join(project, 'dist', name);
   try { await fs.stat(directory); } catch (error) { if (error.code !== 'ENOENT') throw error; await buildPortable(name, target); }
   return installPortable(directory, { noBrowser: true });

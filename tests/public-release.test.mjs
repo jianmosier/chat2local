@@ -57,6 +57,27 @@ test('management shortcuts reopen the installed app and never overwrite unrelate
   await fs.writeFile(file, 'unrelated user script');
   await assert.rejects(() => installManagementEntry(base, { entryDirectory: base, platform: 'darwin' }), /unrelated/);
 });
+test('lost shutdown reply needs a fresh refused connection, never a repeated shutdown or success on reset alone', async () => {
+  const saved={config:{roots:[]},secrets:{}};
+  const store={load:async()=>saved,readSession:async()=>({origin:'http://127.0.0.1:47631',token:'a'.repeat(64),instanceId:'known'})};
+  const state={name:'chat2local',instanceId:'known',version:'old',pending:[],paused:false};
+  let reads=0,posts=0;
+  const call=async(_s,route)=>{
+    if(route==='/api/shutdown'){posts++;throw Object.assign(Error('reply lost'),{code:'ECONNRESET'});}
+    if(++reads===1)return state;
+    throw Object.assign(Error('connection state'),{code:reads===2?'ECONNRESET':'ECONNREFUSED'});
+  };
+  const upgrade=await prepareUpgrade('new',{store,call,wait:async()=>{}});
+  assert.equal(upgrade.stopped,true);assert.equal(posts,1);assert.equal(reads,3);
+  reads=0;posts=0;
+  await assert.rejects(()=>prepareUpgrade('new',{store,wait:async()=>{},call:async(_s,route)=>{
+    if(route==='/api/shutdown'){posts++;return {ok:true};}
+    if(++reads===1)return state;
+    throw Object.assign(Error('reset is not proof'),{code:'ECONNRESET'});
+  }}),/still present/);
+  assert.equal(posts,1);
+});
+
 test('controlled upgrade rejects busy/untrusted apps and retains the exact settings', async () => {
   const idle = { name: 'chat2local', instanceId: 'known', version: 'old', paused: false, queuedOperations: 0, setupActive: false, folderPickerActive: false, pending: [] };
   for (const change of [{ pending: [{}] }, { paused: true }, { name: 'other' }, { instanceId: 'other' }, { queuedOperations: 1 }]) assert.throws(() => assertUpgradeIdle({ ...idle, ...change }, 'known'));

@@ -1,4 +1,4 @@
-export const VERSION = '0.1.0-alpha.19';
+export const VERSION = '0.1.0-alpha.23';
 export const TERMINAL_CAPABILITY = 'terminal-jobs-v1';
 export const MAX_FILE_BYTES = 64 * 1024;
 export const MAX_WIRE_BYTES = 512 * 1024;

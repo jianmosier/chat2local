@@ -63,6 +63,7 @@ export class Store {
   async saveSession(session) { await atomicJson(path.join(this.directory, 'session.json'), await seal(session)); }
   async readSession() { return unseal(JSON.parse(await fs.readFile(path.join(this.directory, 'session.json'), 'utf8'))); }
   privateRecordPath(key) {
+    if (key === 'management-sessions') return path.join(this.directory, 'management', 'sessions.json');
     if (/^terminal-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key)) return path.join(this.directory, 'terminal', key + '.json');
     if (!/^onboarding-(flow|intent)-[a-f0-9]{32}$/.test(key)) throw new Error('Invalid private onboarding record.');
     return path.join(this.directory, 'onboarding', key + '.json');
@@ -123,14 +124,14 @@ export async function openBrowser(url) {
   }
 }
 
-export async function setStartup(enabled, entryFile, stateDir = defaultStateDir()) {
+export async function setStartup(enabled, entryFile, stateDir = defaultStateDir(), options = {}) {
   if (typeof enabled !== 'boolean') throw new Error('Startup requires an explicit boolean.');
   if (!startupAvailable(stateDir)) throw new Error('Login startup is unavailable for a custom development state directory or unsupported system.');
   if (process.platform !== 'win32') {
     const launcher = path.resolve(path.dirname(entryFile), '..', '..', 'scripts', 'launch.mjs');
-    return setPosixStartup(enabled, launcher);
+    return setPosixStartup(enabled, launcher, { node: options.node || process.execPath });
   }
-  const input = Buffer.from(JSON.stringify({ enabled, node: process.execPath, entry: path.resolve(entryFile) })).toString('base64');
+  const input = Buffer.from(JSON.stringify({ enabled, node: options.node || process.execPath, entry: path.resolve(entryFile) })).toString('base64');
   // Launch Node directly: no generated shell command or command-line secret.
   const script = String.raw`$ErrorActionPreference='Stop'; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))|ConvertFrom-Json; $p=Join-Path ([Environment]::GetFolderPath('Startup')) 'Chat2Local.lnk'; $s=New-Object -ComObject WScript.Shell; if(Test-Path -LiteralPath $p){$old=$s.CreateShortcut($p); if($old.Description -ne 'Chat2Local managed startup'){throw 'Existing shortcut is not owned by Chat2Local'}}; if(-not $c.enabled){if(Test-Path -LiteralPath $p){Remove-Item -LiteralPath $p}; exit}; if($c.entry.Contains('"')){throw 'Invalid entry path'}; $l=$s.CreateShortcut($p); $l.TargetPath=$c.node; $l.Arguments='"'+$c.entry+'" --background'; $l.WorkingDirectory=Split-Path -Parent $c.entry; $l.WindowStyle=7; $l.Description='Chat2Local managed startup'; $l.Save()`;
   await powershell(script, input);

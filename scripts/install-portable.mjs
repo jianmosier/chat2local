@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { VERSION } from '../src/shared/protocol.mjs';
 import { prepareUpgrade } from './upgrade-session.mjs';
+import { Store, setStartup, startupAvailable } from '../src/agent/store.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const execute = promisify(execFile);
@@ -74,6 +75,18 @@ export async function installManagementEntry(directory, { entryDirectory, platfo
   return file;
 }
 
+/** Retarget ONLY an already enabled login entry to this verified installation.
+ * Do not enable a previously disabled preference or touch custom test stores. */
+export async function refreshInstalledStartup(directory, { store = new Store(), apply = setStartup, available = startupAvailable, platform = process.platform } = {}) {
+  const { config } = await store.load();
+  if (config.startup !== true) return { enabled: false, updated: false };
+  if (!available(store.directory)) throw new Error('Enabled login startup could not be updated for this state location.');
+  const entry = path.join(directory, 'src', 'agent', 'main.mjs');
+  const node = path.join(directory, 'runtime', platform === 'win32' ? 'node.exe' : 'node');
+  await apply(true, entry, store.directory, { node });
+  return { enabled: true, updated: true };
+}
+
 /** Install app files only. Never change user roots, device keys, OAuth scopes,
  * network settings or startup preferences. Releases are immutable and coexist.
  */
@@ -113,7 +126,8 @@ export async function installPortable(source, options = {}) {
       await upgrade.verify();
     }
     const managementEntry = await installManagementEntry(destination, { entryDirectory: options.installRoot ? path.dirname(installRoot) : undefined });
-    return { installed: true, reused, directory: destination, managementEntry, launched: options.launch !== false, websiteClientVerified: false };
+    const startup = options.launch !== false && !options.installRoot ? await refreshInstalledStartup(destination) : { updated: false };
+    return { installed: true, reused, directory: destination, managementEntry, startup, launched: options.launch !== false, websiteClientVerified: false };
   } finally {
     if (staging) await fs.rm(staging, { recursive: true, force: true });
     await fs.rmdir(lock);

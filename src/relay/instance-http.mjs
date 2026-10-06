@@ -75,7 +75,7 @@ export async function instanceRoute(request, env, origin) {
     const flow = await internal(env, origin, 'makeFlow', input);
     return json({ localUrl: localUrl(env, origin, flow) }, 200, { 'Set-Cookie': cookie(origin, flow.flowId, flow.browser) });
   }
-  const management = /^\/instance\/manage\/(connections|start)$/.exec(route);
+  const management = /^\/instance\/manage\/(connections|start|remove)$/.exec(route);
   if (management) {
     exactFields(input, ['deviceId', 'input']);
     const auth = request.headers.get('Authorization');

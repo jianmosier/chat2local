@@ -12,11 +12,16 @@ const child = spawn(process.execPath, ['--test', '--test-concurrency=1', '--test
 let output = '';
 const collect = bytes => { output += bytes; if (output.length > 4 * 1024 * 1024) child.kill(); };
 child.stdout.on('data', collect); child.stderr.on('data', collect);
-const timer = setTimeout(() => child.kill(), 250000);
+// This cap covers an entire batch of browser/HTTP fixtures, not one test.
+// Keep individual test assertions/timeouts unchanged; a busy Windows desktop
+// must not truncate an otherwise progressing batch at the old tool-call limit.
+let timedOut = false;
+const timer = setTimeout(() => { timedOut = true; child.kill(); }, 600000);
 const result = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal })); });
 clearTimeout(timer);
 const directory = path.join('.artifacts', 'verification-' + VERSION); await fs.mkdir(directory, { recursive: true });
 await fs.writeFile(path.join(directory, `batch-${group}.log`), output);
-await fs.writeFile(path.join(directory, `batch-${group}.json`), JSON.stringify({ group, groups, files, ...result, checkedAt: new Date().toISOString() }, null, 2));
+await fs.writeFile(path.join(directory, `batch-${group}.json`), JSON.stringify({ group, groups, files, ...result, timedOut, checkedAt: new Date().toISOString() }, null, 2));
 console.log(output.slice(result.code === 0 ? -2400 : -7000));
-if (result.code !== 0) process.exitCode = 1;
+if (timedOut) console.error('Test batch timed out before completion; no successful verification is recorded.');
+if (result.code !== 0 || timedOut) process.exitCode = 1;

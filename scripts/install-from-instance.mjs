@@ -82,7 +82,7 @@ async function cli(args) {
     return;
   }
   const existing = await new Store().load();
-  if (existing.secrets.identity?.origin === origin && (existing.config.roots.length || existing.config.accountRoots?.length)) {
+  if (existing.secrets.identity?.origin === origin && (existing.config.roots.length || existing.config.accountRoots?.length || existing.config.managedConnections?.length)) {
     console.log('Opening folder management for this connected computer. No installer login or re-pairing is required.');
     await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [fileURLToPath(new URL('./launch.mjs', import.meta.url)), '--manage'], { stdio: 'inherit', windowsHide: true });

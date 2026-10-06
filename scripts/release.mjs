@@ -7,9 +7,16 @@ import { VERSION } from '../src/shared/protocol.mjs';
 import { packageEntries } from './archive.mjs';
 import { buildPublic } from './build-public.mjs';
 import { checkSource } from './check-source.mjs';
+import { buildReleaseInstallers, verifyReleaseInstaller, releaseAssetFiles, RELEASE_TARGETS } from './release-artifacts.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+export function publicationCloneArgs(branch, source, destination) {
+  // Set checkout policy BEFORE the first checkout. Windows system Git config
+  // may otherwise rewrite LF bytes and invalidate the source SHA-256 manifest.
+  // Clone-local settings leave the owner's system/global Git config unchanged.
+  return ['clone','--config','core.autocrlf=false','--config','core.eol=lf','--single-branch','--branch',branch,source,destination];
+}
 export function releaseOptions(args) {
   const value = { publish: false, create: false };
   for (let i=0;i<args.length;i++) {
@@ -68,6 +75,8 @@ async function verifyReport(file) {
   if(sha(await fs.readFile(report.archive))!==report.sha256)throw Error('Release archive changed.');
   const sidecar=(await fs.readFile(report.archive+'.sha256','utf8')).trim().split(/\s+/);
   if(sidecar[0]!==report.sha256||sidecar[1]!==path.basename(report.archive))throw Error('Release checksum sidecar changed.');
+  if (!Array.isArray(report.installers) || report.installers.length !== RELEASE_TARGETS.length || RELEASE_TARGETS.some(t => !report.installers.some(r => r.target === t))) throw Error('Required Windows/Mac installer set is incomplete.');
+  for (const installer of report.installers) await verifyReleaseInstaller(installer, report.directory);
   return report;
 }
 export async function prepareRelease() {
@@ -77,11 +86,13 @@ export async function prepareRelease() {
   const input=await inputFingerprint();
   console.log('Release 1/4: syntax and full regression checks. No GitHub writes.');
   await run(process.execPath,['scripts/check.mjs'],{visible:true});
-  for(let group=1;group<=3;group++)await run(process.execPath,['scripts/test-batch.mjs',String(group)],{visible:true});
+  for(let group=1;group<=3;group++)await run(process.execPath,['scripts/test-batch.mjs',String(group)],{visible:true,timeout:650000});
   if(await inputFingerprint()!==input)throw Error('Source changed during verification; no release was prepared.');
   console.log('Release 2/4: export only the sanitized source allowlist and verify its manifest.');
   const output=path.join(root,'.artifacts','releases',VERSION+'-'+Date.now());
   const report=await buildPublic(output);
+  report.installers = await buildReleaseInstallers(report.directory);
+  if (await inputFingerprint() !== input) throw Error('Source changed during installer build; no release was prepared.');
   report.testsPassed=true;report.inputFingerprint=input;report.preparedAt=new Date().toISOString();
   const file=path.join(output,'publication-report.json');await fs.writeFile(file,JSON.stringify(report,null,2));
   await verifyReport(file); console.log('Prepared report: '+file);return {file,report};
@@ -103,7 +114,7 @@ export async function publishRelease(file,options) {
   let branch=metadata?.default_branch||'main',previous=null;
   const branchHead=metadata?await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`],{missing404:true}):null;
   if(branchHead){
-    await run('git',['-c','core.hooksPath='+hooks,'clone','--single-branch','--branch',branch,`https://github.com/${repo}.git`,work]);
+    await run('git',['-c','core.hooksPath='+hooks,...publicationCloneArgs(branch,`https://github.com/${repo}.git`,work)]);
     try{previous=JSON.parse(await fs.readFile(path.join(work,'SOURCE-SHA256.json'),'utf8'));}catch{throw Error('Existing repository is not a managed chat2local release. Inspect history before adopting it.');}
     if(previous.product!=='chat2local-source')throw Error('Existing repository identity differs.');
     await checkSource(work,path.join(work,'SOURCE-SHA256.json')); // Refuse unreviewed upstream edits.
@@ -111,7 +122,7 @@ export async function publishRelease(file,options) {
   await syncSnapshot(report.directory,work,previous);
   await checkSource(work,path.join(report.directory,'SOURCE-SHA256.json'));
   await git(['config','core.autocrlf','false']);await git(['add','--all']);
-  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: explicit terminal execution and sanitized publishing`]);
+  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: consistent device lifecycle and versioned installers`]);
   const commit=await git(['rev-parse','HEAD']);if(!/^[a-f0-9]{40}$/.test(commit))throw Error('Commit was not verified.');
   if(!metadata)await run('gh',['repo','create',repo,'--public','--description','Self-hosted multi-device MCP access with explicit folder and terminal permissions.']);
   if(!branchHead)await git(['remote','add','origin',`https://github.com/${repo}.git`]);
@@ -119,15 +130,19 @@ export async function publishRelease(file,options) {
   const remote=await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`,'--jq','.object.sha']);
   if(remote!==commit)throw Error('Remote changed or push was not confirmed; no release created.');
   console.log('Release 4/4: upload draft assets, download them back, then publish.');
-  const notes=`Alpha preview ${VERSION}. Explicit non-sandboxed terminal jobs, stable request IDs, bounded output, timeout/cancel, and independent native/OAuth permissions. Unified sanitized source release. Cloud-service setup and platform consent remain explicit; this is not an independently audited or all-OS-certified product.`;
-  await run('gh',['release','create',tag,report.archive,report.archive+'.sha256','--repo',repo,'--target',commit,'--draft','--prerelease','--title','chat2local '+VERSION,'--notes',notes]);
+  const notes=`Alpha preview ${VERSION}. Matching source, Windows x64, macOS ARM64 and x64 packages. Stable browser management across restarts, explicit partial permission status, login-startup controls and retained startup target on update. Shared folders and device identity are preserved; terminal OAuth is not silently expanded. Downloaded assets are verified before publication. Physical Mac update, full-machine reboot and independent security audit remain separate acceptance items.`;
+  const assetFiles = releaseAssetFiles(report);
+  await run('gh',['release','create',tag,...assetFiles,'--repo',repo,'--target',commit,'--draft','--prerelease','--title','chat2local '+VERSION,'--notes',notes]);
   const verify=path.join(path.dirname(file),'remote-assets');await fs.mkdir(verify);
   await run('gh',['release','download',tag,'--repo',repo,'--dir',verify]);
   if(sha(await fs.readFile(path.join(verify,path.basename(report.archive))))!==report.sha256)throw Error('Uploaded archive does not match; release remains a draft.');
   if(!Buffer.from(await fs.readFile(path.join(verify,path.basename(report.archive)+'.sha256'))).equals(await fs.readFile(report.archive+'.sha256')))throw Error('Uploaded checksum differs; release remains a draft.');
+  for (const file of assetFiles) {
+    if (sha(await fs.readFile(path.join(verify, path.basename(file)))) !== sha(await fs.readFile(file))) throw Error('Uploaded release asset differs; release remains a draft: ' + path.basename(file));
+  }
   await run('gh',['release','edit',tag,'--repo',repo,'--draft=false','--prerelease']);
   const release=JSON.parse(await run('gh',['api',`repos/${repo}/releases/tags/${tag}`]));
-  if(release.draft||!release.prerelease)throw Error('Publication state was not confirmed.');
+  if(release.draft||!release.prerelease||release.assets.length!==assetFiles.length)throw Error('Publication state or complete artifact set was not confirmed.');
   const result={repository:repo,commit,tag,url:release.html_url,sourceSha256:report.sha256,assets:release.assets.map(a=>({name:a.name,size:a.size})),published:true,prerelease:true};
   await fs.writeFile(path.join(path.dirname(file),'published.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));return result;
 }
