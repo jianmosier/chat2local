@@ -223,6 +223,16 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   assert.equal((await post(appC.origin + '/api/shares/connections', {}, { Origin: appC.origin })).status, 401);
   assert.equal((await post(appC.origin + '/api/shares/connections', {}, { Origin: 'https://attacker.invalid', 'X-Chat2Local-Token': appC.token })).status, 403);
   assert.equal((await post(origin + '/instance/manage/connections', { deviceId: identityC.deviceId, input: {} }, { Authorization: 'Bearer ' + tokens.access_token })).status, 401);
+  // Regression: the old global setup bucket (200/hour) was exhausted by
+  // ordinary management polling. Cross that boundary on the real Worker with
+  // the exact device credential, then continue the existing one-consent flow.
+  const beforePolling = JSON.stringify(await storeC.load());
+  for (let i = 0; i < 202; i++) {
+    const polled = await data(await post(origin + '/instance/manage/connections', { deviceId: identityC.deviceId, input: {} }, { Authorization: 'Bearer ' + identityC.deviceKey }));
+    assert.ok(polled.connections.some(c => c.connectionId === originalConnection));
+  }
+  assert.equal(JSON.stringify(await storeC.load()), beforePolling, 'Polling never changes local identity or grants');
+  assert.equal((await data(await owner('connections'))).connections.length, 1, 'Polling did not consume setup capacity');
   await pageC.goto(appC.origin + '/folders#' + appC.token);
   await pageC.locator('#connection option').waitFor({ state: 'attached' });
   await pageC.locator('#open-add').click();

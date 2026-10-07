@@ -1,1 +1,30 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat2Local · 自托管说明</title><link rel="stylesheet" href="/style.css"></head><body><main><h1>入口只需要维护者部署一次</h1><section class="card"><h2>普通使用者</h2><p>无需安装 ngrok、DevSpace、Node.js 或 Cloudflare 命令行。获得可信管理员提供的连接邀请后，在主面板粘贴，核对入口地址，再连接。</p><p>本体验版没有默认公共服务。没有邀请时，可以完整体验本地文件审批，但网页 AI 尚不能访问电脑。这不是网络故障，也不要反复尝试配对。</p></section><section class="card"><h2>自行部署的维护者</h2><p>源码仓库提供 wrangler.jsonc 和 docs/SELF_HOST.md。需要自己的 Cloudflare 账号和部署授权；云服务配额及费用由账号持有人负责。</p><p>部署需要设置固定 HTTPS 地址 PUBLIC_ORIGIN、创建 OAuth 存储与设备对象，并安全设置 ENROLLMENT_KEY。不要把注册密钥提交到 GitHub、聊天记录或公开邀请中。</p><p>部署完成后先检查 /healthz 和未登录的 /mcp，再进行真实客户端测试。配置文件通过本地构建检查并不代表已经部署到公网。</p></section><section class="card"><h2>安全与边界</h2><p>入口运营者可以接触转发的文件正文。仅授权无敏感信息的测试目录，所有写入仍需本机确认。</p><p>当前不提供任意命令行操作，不支持所有文件格式；完整公开服务还需要独立安全审查、运维与滥用防护。</p></section><p>请回到原来的 Chat2Local 标签页继续。关闭此说明页不会停止程序。</p></main></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chat2Local · 安装与连接</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body><main>
+  <h1>安装与连接</h1>
+  <section class="card">
+    <h2>选择操作</h2>
+    <p><strong>没有实例：</strong>使用公开安装入口，登录自己的 Cloudflare 账号并确认创建私人网关；随后在 ChatGPT 添加输出的 /mcp 地址，完成本机目录授权及安装密码设置。</p>
+    <p><strong>新增电脑：</strong>在新电脑执行安装命令并指定原实例地址，在该电脑的浏览器输入实例安装密码，选择目录并确认。旧电脑不必在线，不复制设备凭据，不重复创建 ChatGPT 插件。</p>
+    <p><strong>已配对电脑：</strong>打开已安装的 Chat2Local 入口，复用原身份进入管理页。断网或重启不应默认重新配对。</p>
+  </section>
+  <section class="card">
+    <h2>日常运行</h2>
+    <p>关闭管理网页不停止后台客户端。网络恢复后使用原身份重连；主动退出后重新打开入口。“登录后自动连接”只控制用户登录后的启动。</p>
+    <p>客户端升级、云端部署和 ChatGPT 工具列表更新分别处理。文件可用但命令待授权时，核对原 OAuth scope、本机命令许可和当前会话工具，不重选已有目录。</p>
+  </section>
+  <section class="card">
+    <h2>权限与安全</h2>
+    <p>支持受限文本文件读写，以及单独授权的 PowerShell/sh 命令。终端不是操作系统沙箱，可以访问共享目录之外的文件、网络并删除文件；文件工具的备份不适用于命令副作用。</p>
+    <p>每个使用者维护自己的网关。没有默认公共中继，不依赖 DevSpace、Codex、ngrok 或 Google 登录。网关能够接触转发内容。</p>
+    <p>不要公开安装密码、设备凭据、OAuth 令牌、实际路径或日志。全新第三方账号首装、真实系统重启、应用签名与独立安全审计尚未全部完成。</p>
+  </section>
+  <p><a href="https://github.com/jianmosier/chat2local" target="_blank" rel="noopener noreferrer">源码与完整使用说明</a></p>
+  <p>返回原来的 Chat2Local 管理页继续。关闭此说明页不会停止程序。</p>
+</main></body></html>

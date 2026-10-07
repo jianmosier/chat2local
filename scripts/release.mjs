@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { VERSION } from '../src/shared/protocol.mjs';
 import { packageEntries } from './archive.mjs';
-import { buildPublic } from './build-public.mjs';
+import { buildPublic, publicDocuments } from './build-public.mjs';
 import { checkSource } from './check-source.mjs';
 import { buildReleaseInstallers, verifyReleaseInstaller, releaseAssetFiles, RELEASE_TARGETS } from './release-artifacts.mjs';
 
@@ -38,7 +38,7 @@ export function validateRepository(repo, user, metadata, create) {
   if (metadata && (metadata.full_name !== repo || metadata.archived || metadata.visibility !== 'public' || metadata.permissions?.push !== true)) throw Error('Target is not a writable public repository. No visibility or permission was changed.');
 }
 export async function inputFingerprint(directory = root) {
-  const fixed=['package.json','package-lock.json','README.md','SECURITY.md','install.sh','install.ps1','wrangler.jsonc','.gitignore','docs/GETTING_STARTED.md','docs/QUICKSTART.zh-CN.txt','docs/TERMINAL.md','docs/RELEASE.md'];
+  const fixed=['package.json','package-lock.json','README.md','SECURITY.md','install.sh','install.ps1','wrangler.jsonc','.gitignore',...publicDocuments];
   const names=[...fixed]; for(const sub of ['src','scripts','tests']) names.push(...await packageEntries(path.join(directory,sub),sub+'/'));
   const hash=createHash('sha256'); for(const name of names.sort()) {hash.update(name+'\0');hash.update(await fs.readFile(path.join(directory,name)));} return hash.digest('hex');
 }
@@ -122,7 +122,7 @@ export async function publishRelease(file,options) {
   await syncSnapshot(report.directory,work,previous);
   await checkSource(work,path.join(report.directory,'SOURCE-SHA256.json'));
   await git(['config','core.autocrlf','false']);await git(['add','--all']);
-  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: consistent device lifecycle and versioned installers`]);
+  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: polling isolation, privacy checks and structured documentation`]);
   const commit=await git(['rev-parse','HEAD']);if(!/^[a-f0-9]{40}$/.test(commit))throw Error('Commit was not verified.');
   if(!metadata)await run('gh',['repo','create',repo,'--public','--description','Self-hosted multi-device MCP access with explicit folder and terminal permissions.']);
   if(!branchHead)await git(['remote','add','origin',`https://github.com/${repo}.git`]);
@@ -130,7 +130,7 @@ export async function publishRelease(file,options) {
   const remote=await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`,'--jq','.object.sha']);
   if(remote!==commit)throw Error('Remote changed or push was not confirmed; no release created.');
   console.log('Release 4/4: upload draft assets, download them back, then publish.');
-  const notes=`Alpha preview ${VERSION}. Matching source, Windows x64, macOS ARM64 and x64 packages. Stable browser management across restarts, explicit partial permission status, login-startup controls and retained startup target on update. Shared folders and device identity are preserved; terminal OAuth is not silently expanded. Downloaded assets are verified before publication. Physical Mac update, full-machine reboot and independent security audit remain separate acceptance items.`;
+  const notes=`Alpha preview ${VERSION}. Includes request-budget v2: authenticated device polling is isolated from anonymous setup and authorization. Removes owner-specific literals from public privacy rules, adds read-only public-tree/history audits, and synchronizes structured installation, pairing, reconnection, architecture, permissions and upgrade documentation, including the bundled help page. Matching source, Windows x64, macOS ARM64 and x64 packages; all downloaded assets are verified before publication. No DevSpace runtime dependency or permission expansion. Existing historical references/assets are not rewritten. Cloud deployment and each client's installed version require separate checks. Physical Mac update, full-machine reboot, clean-account setup and independent security review remain separate acceptance items.`;
   const assetFiles = releaseAssetFiles(report);
   await run('gh',['release','create',tag,...assetFiles,'--repo',repo,'--target',commit,'--draft','--prerelease','--title','chat2local '+VERSION,'--notes',notes]);
   const verify=path.join(path.dirname(file),'remote-assets');await fs.mkdir(verify);

@@ -57,7 +57,9 @@ test('Cloudflare runtime: OAuth, device bridge and locally approved write end-to
   };
 
   await t.test('health and OAuth discovery; unauthorized MCP and bad enrollment are rejected', async () => {
-    assert.equal((await unpack(await fetch(`${origin}/healthz`))).name, 'chat2local-relay');
+    const health = await unpack(await fetch(`${origin}/healthz`));
+    assert.equal(health.name, 'chat2local-relay');
+    assert.equal(health.requestBudgetVersion, 2, 'The relay-only hotfix is observable without a client version change.');
     const response = await fetch(`${origin}/mcp`); assert.equal(response.status, 401); assert.match(response.headers.get('www-authenticate'), /resource_metadata/);
     const metadata = await unpack(await fetch(`${origin}/.well-known/oauth-protected-resource/mcp`)); assert.equal(metadata.resource, `${origin}/mcp`);
     assert.equal((await fetch(`${origin}/enroll`, { method: 'POST', body: '{}' })).status, 401);

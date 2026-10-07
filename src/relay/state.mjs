@@ -9,6 +9,7 @@ import { AccountDirectory } from './account-directory.mjs';
 import { OnboardingStore } from './onboarding-store.mjs';
 import { PrivateInstance } from './private-instance.mjs';
 import { InstallPortal } from './install-portal.mjs';
+import { consumeBudget } from './request-budget.mjs';
 
 export const validDevice = id => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
 export const validSecret = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -221,17 +222,7 @@ export class Registry extends DurableObject {
       if (this.env.ACCOUNT_CONNECTIONS !== 'true' && this.env.PRIVATE_INSTANCE !== 'true') return json({ error: 'Scoped connections are not enabled.' }, 403);
       return json(await new AccountDirectory(this.ctx.storage).execute({ action: 'resolve', grant: value }));
     }
-    if (route === '/budget') {
-      const limits = { register: 100, authorize: 1000, token: 6000, enroll: 200, setup: 200 };
-      if (!Object.hasOwn(limits, value.bucket)) return json({ error: 'Invalid budget.' }, 400);
-      const key = `budget:${value.bucket}`; const now = Date.now();
-      return this.ctx.storage.transaction(async storage => {
-        let record = await storage.get(key);
-        if (!record || record.until <= now) record = { count: 0, until: now + 3_600_000 };
-        if (record.count >= limits[value.bucket]) return json({ error: 'Relay request budget exceeded; retry later.' }, 429);
-        record.count++; await storage.put(key, record); return json({ ok: true });
-      });
-    }
+    if (route === '/budget') return consumeBudget(this.ctx.storage, value);
     if (route === '/self-enroll') {
       if (!validDevice(value.deviceId) || !validSecret(value.keyHash) || !validSecret(value.ipHash)) return json({ error: 'Invalid registration.' }, 400);
       const limit = Number(this.env.SELF_SERVICE_DEVICE_LIMIT ?? 10);

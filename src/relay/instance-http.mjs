@@ -1,6 +1,7 @@
 import { json, readLimited, sha256 } from '../shared/protocol.mjs';
 import { exactFields, isAccountId, isDigest } from '../shared/connection-access.mjs';
 import { connectionResultPage } from './connection-result.mjs';
+import { deviceBudget } from './request-budget.mjs';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const enabled = env => env.PRIVATE_INSTANCE === 'true' && env.ACCOUNT_CONNECTIONS !== 'true';
@@ -84,6 +85,7 @@ export async function instanceRoute(request, env, origin) {
     const verified = await stub.fetch(new Request('http://internal/account-auth', { method: 'POST', headers: { Authorization: auth } }));
     const identity = await verified.json();
     if (!verified.ok) throw fail('Device authentication failed.', verified.status);
+    await deviceBudget(env, input.deviceId, management[1] === 'connections');
     return json(await internal(env, origin, 'manage', { action: management[1], device: { deviceId: input.deviceId, epoch: identity.epoch, keyHash: await sha256(auth.slice(7)) }, input: input.input }));
   }
   const native = /^\/instance\/native\/(enroll|start|prepare|status|confirm|activate|cancel)$/.exec(route);
@@ -103,5 +105,6 @@ export async function instanceRoute(request, env, origin) {
   }
   const verified = await stub.fetch(new Request('http://internal/account-auth', { method: 'POST', headers: { Authorization: auth } }));
   const identity = await verified.json(); if (!verified.ok) throw fail('Device authentication failed.', verified.status);
+  await deviceBudget(env, input.deviceId, action === 'status');
   return json(await internal(env, origin, 'native', { action, flowId: input.flowId, secret: input.secret, invitation: input.invitation, input: input.input, device: { deviceId: input.deviceId, epoch: identity.epoch, keyHash } }));
 }

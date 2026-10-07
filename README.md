@@ -1,92 +1,130 @@
 # chat2local
 
-**用一个 ChatGPT MCP 连接，访问你自己多台电脑上明确共享的文件夹。**
+通过一个 ChatGPT MCP 连接，读写多台电脑上明确共享的文件夹，并在单独授权后执行本机命令。
 
-开源、自托管。每个使用者部署自己的网关；没有作者的默认中继、Google 登录依赖或共享后台。Windows 与 Mac 已有真实设备读写记录；当前仍是 **Alpha 开发预览**，不是经过独立安全审计的成品。
+**版本：0.1.0-alpha.24 · Alpha 预览 · MIT License**
 
-## 一条命令开始
+## 1. 功能与边界
 
-macOS / GNU Linux，在普通用户终端运行（不用 sudo）：
+| 项目 | 当前实现 |
+| --- | --- |
+| 文件访问 | 枚举目录；读取、创建、修改不超过 64 KiB 的 UTF-8 文本 |
+| 写入保护 | 覆盖前备份；通过 SHA-256 检测并发修改；保留逐次审批模式 |
+| 命令执行 | Windows PowerShell；macOS/Linux sh；查询输出、超时、取消及防重复执行 |
+| 多设备 | 每台电脑独立身份；调用时明确目标；目标离线不切换到其他电脑 |
+| 接入方式 | 自托管 Cloudflare Workers / Durable Objects / KV；没有默认公共中继 |
+| 运行依赖 | 客户端随包提供 Node.js；不依赖 DevSpace、Codex、ngrok 或 Google 登录 |
 
-```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/jianmosier/chat2local/main/install.sh | sh
-```
+**终端不是操作系统沙箱。** 命令以桌面用户权限运行，可以访问共享目录之外的文件、使用网络和删除文件；文件工具的备份与路径限制不适用于命令副作用。仅向可信客户端开放。网关可以接触转发内容，不提供针对网关运营者的端到端加密。[权限说明](docs/PERMISSIONS.md) · [安全边界](SECURITY.md)
 
-Windows 10+，在普通 PowerShell 运行：
+## 2. 选择入口
+
+| 你的情况 | 操作 | 是否需要重新配对 |
+| --- | --- | --- |
+| 从未使用，没有自己的实例 | 执行下方“首次创建实例” | 首次登记设备并完成 ChatGPT 授权 |
+| 已有实例，要加入一台新电脑 | 在新电脑执行带实例地址的命令 | 新电脑独立登记；不新建 ChatGPT 插件 |
+| 这台电脑已连接，只是断网、重启或关闭程序 | 打开已安装的 Chat2Local 入口 | 本机身份仍有效时不需要 |
+| 只要新增共享目录 | 打开管理页，添加目录并确认 | 不需要安装密码或重新安装 |
+| 文件可用，命令待授权 | 核对本机命令许可、OAuth scope 和 ChatGPT 工具列表 | 不重选已有目录 |
+| 更新软件 | 按[升级说明](docs/OPERATIONS.md#3-升级)区分客户端、云端和 ChatGPT 工具 | 不重置已有身份或权限 |
+
+## 3. 首次创建实例
+
+### 前提
+
+需要自己的 Cloudflare 账号，以及能够添加相应自定义 MCP 应用的 ChatGPT 账号/工作区。平台可用性、写入能力和工具刷新方式以账号实际入口及 [OpenAI 官方说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) 为准；安装本项目不会解锁平台未开放的权限。
+
+### Windows 10+：普通 PowerShell
 
 ```powershell
 & ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/jianmosier/chat2local/main/install.ps1')))
 ```
 
-命令会下载固定版本源码和经过 SHA-256 校验的官方 Node 运行环境，不要求先装 Node、Git、Codex 或 DevSpace。**首次自托管**会打开你自己的 Cloudflare 登录，询问是否创建私人 Worker 与 OAuth 存储，然后配置本机客户端。云服务的账号注册、必要的服务条款和可能产生的用量费用由你自行决定。
-
-这是**一个命令启动并执行配置流程**，不是跳过安全确认：你仍需首次登录云服务、在 ChatGPT 添加生成的 MCP 地址，以及明确确认要共享的目录。不要把安装密码或云端密钥发到聊天里。
-
-## 第二台电脑
-
-在新电脑使用同一个入口并指定自己的实例地址。无需第一台电脑在线，不传邀请 JSON，不复制设备密钥：
+### macOS：普通终端，不使用 sudo
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/jianmosier/chat2local/main/install.sh | sh -s -- --instance 'https://YOUR-INSTANCE.workers.dev'
+curl -fsSL --proto '=https' --proto-redir '=https' \
+  https://raw.githubusercontent.com/jianmosier/chat2local/main/install.sh | sh
 ```
+
+入口下载固定版本源码和官方 Node 运行环境，校验 SHA-256 后执行配置。首次自托管依次完成：Cloudflare 登录、资源创建确认、本机安装、ChatGPT MCP 配置、本机目录授权、实例安装密码设置。云服务条款和可能产生的费用由实例所有者决定。详细步骤见[首次安装](docs/GETTING_STARTED.md#2-首次创建实例)。
+
+**当前尚未完成全新第三方 Cloudflare 账号的完整端到端验收。** 失败后保留已有配置与错误信息，不删除身份数据、不重复创建云资源。
+
+## 4. 新增电脑
+
+使用原实例地址，不创建另一套网关。以下 `YOUR-INSTANCE` 必须替换为自己的实例域名，不能直接照抄。
+
+Windows：
 
 ```powershell
 & ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/jianmosier/chat2local/main/install.ps1'))) -Instance 'https://YOUR-INSTANCE.workers.dev'
 ```
 
-首次加入新设备，在该设备的浏览器输入**自己的实例安装密码**，选择真正需要的目录并确认。这个密码只用于新增设备接入，不是文件访问令牌。日常追加目录不走这条安装登录流程。
+macOS：
 
-## 日常使用：不用再安装、登录或配对
+```sh
+curl -fsSL --proto '=https' --proto-redir '=https' \
+  https://raw.githubusercontent.com/jianmosier/chat2local/main/install.sh \
+  | sh -s -- --instance 'https://YOUR-INSTANCE.workers.dev'
+```
 
-管理页每 5 秒在后台同步；未变化的列表和按钮保持原样，不反复禁用或重绘。切回页面时检查最新状态。新增 ChatGPT 能力仍需平台明确授权，不通过同步扩大旧令牌权限。
+在新电脑的浏览器输入实例安装密码，选择本机目录并确认。原有电脑不必在线；不复制设备密钥，不传邀请 JSON，不重复创建 ChatGPT 插件。日常管理不再要求安装密码。
 
-父目录权限覆盖子目录时，子项折叠显示，独立授权记录仍保留；子目录额外拥有命令或写入能力时不折叠。移除父目录保留有效的独立子项；移除子目录会同时撤销覆盖它的父目录共享，并在确认框列出影响。本机先撤销，云端失败保留同一次请求重试。磁盘文件不删除，命令副作用不回滚，保留的非沙箱终端仍可能访问其他路径。
+| 地址 | 用途 |
+| --- | --- |
+| `https://YOUR-INSTANCE.workers.dev` | 安装命令的实例参数 |
+| `https://YOUR-INSTANCE.workers.dev/mcp` | ChatGPT 应用的 MCP 端点 |
 
-安装后保留稳定的 **Chat2Local 启动入口**；Mac 位于用户的 `~/Applications/Chat2Local.command`。打开它即进入当前电脑的共享目录管理。也可重复运行安装入口，程序验证并复用或受控更新已有安装，不重置设备身份或目录。
+## 5. 日常打开与回连
 
-日常管理的新增默认是**完整共享：读写文件并执行命令**，批量选目录后确认一次。确认前明确提示命令可以访问目录外文件及网络；旧的文件授权不会自动升级，原有只读/逐次确认模式继续保留。完整共享的文件与本机命令许可一起保存，但旧 OAuth 没有命令权限时显示“可读写 · 命令待授权”，不会把文件访问也误报为未授权。后台返回范围与显示不同则重新核对。新管理页不再提供两组独立开关。首次设备安装向导仍兼容原文件授权流程。
+Windows：按 Win+R，输入：
 
-当前文件工具支持读取、创建及修改不超过 64 KiB 的 UTF-8 文本；覆盖前备份，并用文件哈希避免覆盖别人的新修改。文件工具不支持删除、二进制传输或整盘开放。多设备时必须明确目标电脑，目标离线不会改操作另一台。
+```text
+%LOCALAPPDATA%\Chat2Local\Chat2Local.cmd
+```
 
-## 更新、打开管理页与重启
+macOS：
 
-管理页底部 **“更新与启动”** 提供当前电脑的更新命令、管理入口和“登录后自动连接”开关。更新命令使用自己的实例，不需要另一台电脑在线。已连接设备复用原身份，更新不重新配对、不重新选择文件夹。已启用的登录项会随更新改指向新版本；关闭的登录项不会被升级偷偷打开。
+```sh
+open "$HOME/Applications/Chat2Local.command"
+```
 
-Mac 在终端执行 `open "$HOME/Applications/Chat2Local.command"` 打开管理页；Windows 用 Win+R 打开 `%LOCALAPPDATA%\\Chat2Local\\Chat2Local.cmd`。经过本机启动器验证的同一浏览器可在客户端重启后继续管理；其他浏览器首次仍需启动器验证。浏览器管理登录与 ChatGPT 的 OAuth 是不同会话。
+关闭管理网页不停止后台程序。网络恢复后客户端使用原身份自动重连。主动退出程序后需重新打开入口。管理页“更新与启动”中的“登录后自动连接”控制系统登录后的启动，不是开机登录前的系统服务。
 
-开启“登录后自动连接”后，电脑重启并登录系统时启动客户端，网络恢复后沿用设备身份自动连接。不是开机登录前运行的系统服务，也不保证休眠、关机或无网络时可访问。退出客户端后不会强行拉起。**真实整机重启及本次 Mac 原机升级仍须独立验收。**
+断连、OAuth 失效、身份丢失是不同问题。按[回连故障表](docs/OPERATIONS.md#2-断连与恢复)处理，不把重新安装或重新配对作为默认修复。
 
-文件可用但命令待授权时，点击“完成命令授权”查看原 ChatGPT 插件工具刷新与新增 scope 的确认步骤；自动同步不会代替平台授权，也不会把七个旧工具变成十个新工具。
+## 6. 验证是否可用
 
-## 命令执行与权限边界
+按顺序核对：
 
-新增 `terminal_execute`、`terminal_status`、`terminal_cancel`。Windows 使用 PowerShell，macOS/Linux 使用 sh；支持异步任务、输出/退出码、超时和取消。稳定 requestId 防止重复请求重放命令，结果未知时不能自动换 ID 重跑。
+1. `list_devices`：目标电脑在线，多设备时明确 `deviceId`。
+2. `list_roots`：目标目录存在，文件权限符合预期。
+3. 文件读写：先检查当前会话实际提供的工具，使用专用测试文件和返回的哈希验证。
+4. 终端：工具列表包含三个终端工具，且 `terminalLocalEnabled`、`terminalScopeGranted`、`terminalAllowed` 均为 `true`；再执行无副作用命令并查询退出码。
 
-执行命令仍须同时具备 `terminal:execute` OAuth scope 和本机明确许可；完整共享将文件和命令的本机许可合为一次确认，旧文件共享可通过“升级共享”明确迁移。**终端不是操作系统沙箱**，以桌面用户权限运行，能够访问目录外文件和网络，也能删除文件；普通文本工具的备份承诺不适用于命令本身。详情见 [终端边界](docs/TERMINAL.md)。
+服务器声明、ChatGPT 保存的工具列表、当前会话工具和本次 OAuth 权限分别核对。不能用其他插件执行成功，替代 Chat2Local 实际调用验收。
 
-## 当前边界
+## 7. 文档
 
-- 自动自托管适配器目前是 **Cloudflare Workers / Durable Objects / KV**，不是任意隧道供应商的一键适配。
-- 无配置的公开客户端不会偷偷使用作者服务。
-- 已连接设备的批量目录管理使用本机受保护网页。**在 ChatGPT 对话内直接批准扩大目录范围的交互卡片尚未实现**；模型不能自己调用文件工具提升权限。
-- 新增目录和撤销现有目录的协议不同；批量新增已实现，新页面暂未提供全部权限编辑功能。原有本机撤销/暂停接口仍有效。
-- 安装/版本/别名路径检查、模拟全新实例及浏览器集成均有测试，但**全新第三方 Cloudflare 账号从零安装、所有操作系统、系统重启与应用签名/公证尚未完整验收**。有错误时保留原配置并返回错误，不伪报成功。
-- 云端或操作系统必要的人类授权不能由脚本绕过。连通性、目录授权和实际读写是不同的验收项。
+| 文档 | 内容 |
+| --- | --- |
+| [安装与配对](docs/GETTING_STARTED.md) | 首次部署、新增设备、已配对设备、成功判据 |
+| [运维与恢复](docs/OPERATIONS.md) | 断连、自启、升级、云端更新、故障表 |
+| [架构](docs/ARCHITECTURE.md) | 组件、通信链路、身份与存储、源码目录 |
+| [权限](docs/PERMISSIONS.md) / [终端](docs/TERMINAL.md) | 权限交集、目录撤销、命令边界 |
+| [请求限流](docs/REQUEST_BUDGET.md) | 正常轮询与安装授权分离；429 处理 |
+| [发布](docs/RELEASE.md) / [变更记录](docs/CHANGELOG.md) | 脱敏、测试、版本和产物验证 |
 
-## 开发与发布
+## 8. 开发
 
 ```sh
 npm ci --ignore-scripts
 npm run verify
-npm run test:management
 npm run build:public
 npm run release
-# 通过验证、脱敏导出、提交和远端下载校验后发布
-npm run release -- --publish --repo YOUR_LOGIN/chat2local
 ```
 
-完整浏览器套件当前使用 Windows + Edge；跨平台核心测试可单独运行。源码导出采用明确白名单，排除 `wrangler.local.jsonc`、`.artifacts`、个人会话、设备凭据、日志与内部交接记录。公开构建检查不依赖个人配置。
+`release` 默认只准备；显式 `--publish --repo OWNER/chat2local` 才写入 GitHub。发布会检查完整测试、脱敏源码清单、三种客户端安装包及远端下载一致性。不会自动部署云端或更新本机客户端。
 
-`npm run release` 默认只准备，不写 GitHub；`--publish` 才提交并发布；不存在的仓库需显式 `--create-repo`。同一次 release 构建并校验同版本的源码、Windows x64、Mac ARM64 和 Mac x64 包，各附 SHA-256；安装包中的源码必须匹配脱敏快照。以后使用同一个脚本更新版本，不强推、不覆盖旧标签，不上传私人配置。详见 [Release 流程](docs/RELEASE.md)。
-
-详细说明：[使用与部署](docs/GETTING_STARTED.md) · [安全边界](SECURITY.md)。MIT License。
+Windows x64、macOS ARM64、macOS x64 有版本化发布包；源码包含 GNU/Linux 适配，但该平台未达到同等实机验收范围。macOS 签名/公证、真实整机重启、全新第三方账号首装及独立安全审计仍是验收项，不以模拟测试替代。

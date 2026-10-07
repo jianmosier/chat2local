@@ -1,38 +1,87 @@
-# 脱敏与 GitHub Release
+# 发布与脱敏
 
-`npm run release` 是统一发布入口。它只处理公开源码副本，不上传开发目录，不部署私人云端、不改变本机授权，也不自动公开私人 GitHub 仓库。
+适用版本：0.1.0-alpha.24。
 
-## 常用命令
+## 1. 发布产物
+
+| 产物 | 内容 |
+| --- | --- |
+| 源码 tar.gz | 白名单源码、测试、公开文档与 `SOURCE-SHA256.json` |
+| Windows x64 zip | 客户端程序、官方 Node 运行时、使用说明及构建清单 |
+| macOS ARM64 tar.gz | Apple Silicon 客户端 |
+| macOS x64 tar.gz | Intel 客户端 |
+| 四个 `.sha256` 文件 | 对应上述四个包的 SHA-256 |
+
+共八个 Release 附件。客户端非运行时文件必须与脱敏源码快照一致；下载后的每个附件还须与本地发布输入逐字节一致。
+
+## 2. 正常流程
 
 ```sh
-# 完整回归后构建脱敏源码和 Windows/Mac 安装包，各附 SHA-256；不写 GitHub
 npm run release
-
-# 完成以上步骤后提交到自己的 GitHub 仓库并创建开发预览 Release
-npm run release -- --publish --repo YOUR_LOGIN/chat2local
-
-# 仅在确实还没有该仓库时，显式允许创建这个公开目标
-npm run release -- --publish --repo YOUR_LOGIN/chat2local --create-repo
-
-# 上一步已经准备成功，只继续发布：报告必须仍匹配最新源码和测试
-npm run release -- --publish --repo YOUR_LOGIN/chat2local --from PATH_TO_PUBLICATION_REPORT
+# 检查完整报告后发布：
+npm run release -- --publish --repo OWNER/chat2local --from VERIFIED_REPORT
 ```
 
-省略 `--repo` 时从已经登录的 GitHub CLI 读取用户名，默认目标是该用户名下的 `chat2local`，不会假定维护者账户。需要事先通过 `gh auth login` 正常登录。执行脚本不读取、打印或复制 GitHub 凭据；Git 使用正常 credential helper。
+也可用一次命令完成正常全流程：
 
-每个发布版本必须唯一。更改 package.json、package-lock.json、src/shared/protocol.mjs 和两个 bootstrap 的版本，保持一致。已存在的标签和 Release 不覆盖；新版本在原远端历史上正常提交，不 force-push。首次导入不带内部调试历史。
+```sh
+npm run release -- --publish --repo OWNER/chat2local
+```
 
-## 四个阶段
+默认只准备，不写 GitHub。不存在的仓库只有显式增加 `--create-repo` 才允许创建。已有仓库沿用原历史；不强推、不覆盖已有标签、不替换旧 Release 附件。
 
-1. **验证**：语法检查及完整测试分成三个互不重复的批次。测试前后计算输入摘要，源码同时被别人修改就停止。没有 `--skip-tests` 发布开关。
-2. **脱敏构建**：明确白名单复制源码、测试、通用说明和安装脚本；排除私人部署、目录授权、设备身份、令牌、日志、内部交接、下载及构建缓存。扫描当前部署 ID/域名和凭据特征；发现疑似泄露则停止，不盲目替换业务源码。没有配置的客户端不默认连接作者实例。从同一脱敏快照构建 Windows x64、macOS ARM64 和 macOS x64 包，校验官方 Node 运行环境、安装包清单以及包内源码一致性。
-3. **版本更新**：在独立的 Git 工作目录操作。克隆时在首次检出前设置该副本的 `core.autocrlf=false` 与 `core.eol=lf`，避免 Windows 换行转换使逐字节摘要失配；不修改使用者的全局或系统 Git 设置，也不归一化或放宽校验。已有仓库须具备上一次 SOURCE-SHA256.json；核对旧公开文件未被另行修改，按新清单更新。只删除之前明确由发布器管理且本版已去掉的文件，保留其他文件和 Git 历史。提交使用 GitHub noreply 邮箱。
-4. **远端验收**：推送后核对远端 commit；创建 Draft Release 并上传源码压缩包、三个平台安装包及各自 SHA-256，共八个附件；下载全部已上传文件逐字节/摘要核对，通过后才公开为 prerelease。脚本写出 published.json 记录结果。
+| 阶段 | 必须通过 |
+| --- | --- |
+| 版本检查 | package、lock、协议与两个安装入口版本一致 |
+| 回归 | 语法检查及完整测试；失败、跳过、超时不计为通过 |
+| 输入冻结 | 测试前后、构建前后源码 fingerprint 一致 |
+| 脱敏导出 | 仅允许列表中的文件；公开正文扫描通过 |
+| 客户端构建 | 三平台包齐全，源码对应，运行时校验通过 |
+| GitHub 提交 | 使用受控独立发布工作区；noreply 提交身份；远端 HEAD 核对 |
+| 附件发布 | 先上传草稿，下载全部附件验证后才公开 |
 
-`--from` 只接受与当前源码、版本、完整测试和压缩包哈希匹配的报告，不拿过期导出包冒充新版。发布中断不自动删除工作目录、修改标签或重放创建操作；根据实际阶段核对远端后继续，不能只看某一个 subprocess 退出码就宣称全部发布成功。
+Windows 的发布 clone 在第一次 checkout 前设置 `core.autocrlf=false` 与 `core.eol=lf`，防止系统 Git 自动改换行；不修改用户全局 Git 配置。
 
-## 不属于这个脚本的承诺
+`--from` 只接受版本、完整测试记录、fingerprint 和全部哈希仍一致的报告。失败任务先核对已完成阶段，不直接重跑可能已推送或已创建的发布操作。
 
-当前自动化验证不等于所有物理平台和陌生 Cloudflare 账号已经实测。Release 默认标为 Alpha prerelease，不是安全认证、应用签名或 Mac 公证。发布到 GitHub 也不等于已部署维护者实例，更不等于用户的 ChatGPT 会话已加载新工具。
+## 3. 脱敏规则
 
-脱敏扫描是工程防护而非任意秘密的完美检测器。不要将新密钥写进源码；自定义扩展白名单前先检查待发布内容。
+公开清单由 `scripts/build-public.mjs` 管理。文档清单也参与发布 fingerprint，新增文档必须纳入清单，不能只在本地写好但漏发。
+
+排除：私有部署配置、`.artifacts`、`.wrangler`、内部交接、设备凭据、本机状态、日志、备份、实际终端输出与未批准的辅助脚本。默认中继必须为空。
+
+检测分两层：
+
+1. 通用规则：私钥与常见令牌特征、设备主机名等；公开规则本身不能包含维护者的具体个人值。
+2. 私有输入：从构建机及本地私有部署配置读取实际值；其他设备的敏感值可放入 `.artifacts/publication-private-values.json` 字符串数组，绝不导出或打印内容。
+
+扫描错误只报告文件与类别，不输出命中的秘密。使用合成数据编写测试，不把真实主机名改写成测试常量。
+
+公开 GitHub 用户名、MIT 署名及 GitHub noreply 邮箱属于项目公开身份，不等同于私人联系邮箱、设备身份或云凭据。
+
+## 4. 审计范围
+
+```sh
+npm run audit:public -- --tree PATH_TO_EXPORTED_SOURCE
+npm run audit:public -- --git PATH_TO_PUBLIC_CHECKOUT
+```
+
+树扫描检查指定公开目录；Git 扫描检查该 checkout 中可达的所有已获取引用、提交元数据及 blob，不会访问未获取的远端引用。输出统计、文件/对象位置与失败类别，不输出原始敏感内容。扫描器不自动改写文件、历史或远端仓库。
+
+新版本通过不等于旧提交、旧标签、旧安装包、第三方 fork 或缓存全部清理。发现有效密钥时应优先由所有者撤销/轮换；历史改写和旧附件处理必须单独制定范围并验证，不能因删除当前文件就宣布泄漏消失。
+
+同一托管来源的 SHA-256 不等于独立签名或供应链攻击防护。当前签名/公证、独立可复现构建和外部安全审计尚未完成。
+
+## 5. 软件同步验收
+
+发布 GitHub 不自动部署 Worker，也不自动替换客户端。依照 [OPERATIONS.md](OPERATIONS.md#3-升级)，分别记录：
+
+| 对象 | 证据 |
+| --- | --- |
+| GitHub main | 提交 SHA |
+| Release | 标签、是否公开、八个附件及哈希 |
+| 云端 | `/healthz.version`、`requestBudgetVersion`、实际部署记录 |
+| Windows/macOS | 实际运行版本、身份与目录保持、实际工具调用 |
+| 安装入口 | 脚本版本、包版本、固定源码 URL 与下载校验 |
+
+离线设备、未进行的真实重启和未测试的新账号首装明确标注未验收，不以模拟或构建通过替代。

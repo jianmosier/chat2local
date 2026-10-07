@@ -85,8 +85,8 @@ test('installer refuses an active lock instead of deleting it or killing process
   assert.equal((await fs.stat(path.join(installRoot, '.install-lock'))).isDirectory(), true);
 });
 test('installation paths are separate from portable source and keep per-user permissions', () => {
-  assert.equal(installationDirectory({ platform: 'darwin', home: '/Users/jack', env: {} }), '/Users/jack/Library/Application Support/Chat2Local/apps');
-  assert.equal(installationDirectory({ platform: 'linux', home: '/home/jack', env: {} }), '/home/jack/.local/share/chat2local/apps');
+  assert.equal(installationDirectory({ platform: 'darwin', home: '/Users/test-user', env: {} }), '/Users/test-user/Library/Application Support/Chat2Local/apps');
+  assert.equal(installationDirectory({ platform: 'linux', home: '/home/test-user', env: {} }), '/home/test-user/.local/share/chat2local/apps');
   assert.throws(() => installationDirectory({ platform: 'unknown' }));
 });
 test('generated POSIX bootstrap is pinned, HTTPS-only, and needs no Node/npm/Git', () => {

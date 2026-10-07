@@ -17,8 +17,8 @@ async function fixture(t) {
   const app = await startController({ port: 0, stateDir: path.join(base, 'private'),
     pickFolder: ({ signal }) => { signals.push(signal); started(); return new Promise(resolve => { finish = resolve; }); }
   });
-  const local = (route, body, extra = {}) => fetch(`${app.origin}/api/${route}`, {
-    method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(6000),
+  const local = (route, body, extra = {}, timeoutMs = 6000) => fetch(`${app.origin}/api/${route}`, {
+    method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
     headers: { Origin: app.origin, 'X-Chat2Local-Token': app.token, 'Content-Type': 'application/json', ...extra },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
@@ -80,7 +80,10 @@ test('actual browser: picker waits independently; one permission change saves im
   t.after(() => browser.close());
   // This invokes the bridge's local callback, not a real ChatGPT request; UI fixture only.
   await f.app.bridge.invoke('list_roots', {}); f.app.bridge.state = 'connected';
-  const pendingNative = f.local('pick-folder', {}); await f.entered;
+  // This request intentionally remains open while the browser exercises the UI.
+  // The ordinary 6s API deadline must not cancel it before the explicit click;
+  // the overall test remains bounded by 45s and cancellation is still asserted.
+  const pendingNative = f.local('pick-folder', {}, {}, 40000); await f.entered;
   const page = await browser.newPage({ viewport: { width: 1150, height: 1000 } });
   await page.goto(`${f.app.origin}/manage#${f.app.token}`); // Test the retained management route.
   await page.waitForFunction(() => document.querySelector('.effective-permission')?.textContent.includes('每次修改前确认'));

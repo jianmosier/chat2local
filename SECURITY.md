@@ -1,47 +1,60 @@
-# Security boundaries
+# 安全边界
 
-chat2local is an Alpha self-hosted file-access utility, not an independently audited remote-administration product. Do not expose its localhost control port directly to the Internet. Run a separate private instance for each owner.
+Chat2Local 是 Alpha 自托管工具，未完成独立安全审计。每个所有者使用独立私人实例；不要把本机控制端口直接开放到公网。
 
-## Authorization
+## 1. 认证与授权
 
-The public MCP endpoint requires OAuth with S256 PKCE, registered callback validation and scope enforcement. Each computer has an independent device credential; the relay verifies that device before accepting its outbound transport. One reference grant resolves only devices and folders explicitly activated for that particular connection. Adding a device never copies an old computer's key. Ambiguous targets fail rather than selecting a different machine.
+| 边界 | 机制 |
+| --- | --- |
+| ChatGPT → 网关 | OAuth、S256 PKCE、回调校验、scope 校验 |
+| 本机 → 网关 | 每设备独立凭据，验证设备身份和版本化撤销状态 |
+| 文件访问 | OAuth scope、当前连接共享范围、本机目录策略的交集 |
+| 终端 | 独立 `terminal:execute`、直接可写共享、绑定该连接和目录的本机明确许可 |
+| 浏览器 → 本机管理 | loopback 绑定、控制会话、精确 Host/Origin 校验及有界输入 |
+| 新设备安装 | 实例安装密码、短期凭证、独立浏览器与设备声明证明 |
 
-File operations require the intersection of token scopes, the connection's share list and the current native folder policy. `write_file` needs both OAuth `files:write` and explicit native direct-write permission. `propose_write` remains a reviewed proposal even for a directly writable root. New scope, new directory, or changed software version cannot silently supply consent.
+安装密码不是文件访问令牌；本机控制会话不是 OAuth。新增设备不复制旧设备凭据，模糊目标不自动选择。远程文件工具不能调用本机授权 API 扩大范围。
 
-The daily management API is NOT an MCP file tool. Its local endpoints require a per-process control secret, exact Host/Origin checks and bounded input. The native agent proves its own identity to the existing connection, prepares exact folder/mode snapshots, and activates them only after the user's persisted local confirmation. It cannot enroll other devices, mint OAuth tokens or authorize a different connection merely with its name. The interface's preparation step grants nothing; the one final consent covers the entire displayed batch.
+## 2. 文件工具
 
-New-device installation uses a separate owner-configured installation password and short-lived tickets with different native-claim and browser proofs. No default password is generated or published. The installer login cannot read existing shared files or replace operator credentials. Invitations are limited, expiring and device/session-bound; they do not contain the operator key.
+当前只处理不超过 64 KiB 的 UTF-8 文本。拒绝路径穿越、链接/junction、多重硬链接、敏感文件名、非文本与超限内容。写入使用哈希比对、串行提交及覆盖前备份；不提供删除、二进制传输或整盘开放。
 
-## File and transport controls
+这些路径检查不是操作系统沙箱，不能隔离同用户恶意软件；路径竞争仍需进一步加固。备份会占用磁盘，尚无完整保留与恢复界面。
 
-The local service binds to 127.0.0.1, with bounded bodies, same-origin control APIs and no framing. Standard file operations reject path traversal, links/junctions, multiple hard links, sensitive filenames, non-UTF-8 or oversized content. Current limit is 64 KiB per text file. Hash matching, serial commits and backup-before-replacement protect against accidental overwrites. File tools do not provide deletion, command execution or drive-root access. The SEPARATELY authorized terminal tools below are not subject to the file-tool sandbox-like path checks once a command runs.
+## 3. 终端
 
-Revocation/pause are checked locally and on relevant server paths. Network reconnect does not replay file writes. Unknown write outcomes require reading back before retrying. Directory change journals resume the same decision, rather than granting a new scope after an uncertain response.
+命令以桌面用户身份运行，能够访问 cwd 之外的文件、网络和该用户可读的秘密，能够删除文件及启动脱离的子进程。文件工具的目录过滤、文件大小限制与覆盖备份不适用于命令副作用。
 
-The owner of the HTTPS relay can see file contents in transit; this is not end-to-end encryption against that owner. File payloads are not deliberately persisted as cloud records, while OAuth metadata, permissions, hashes and bounded coordination state are. Do not enable payload logging on the public Worker.
+任务在启动前持久化，同一 requestId 不二次启动。重启后未完成记录标记中断/未知，不自动重放。输出和日志有界，日志满时拒绝新命令，不静默删除防重放证据。
 
-## Explicit terminal execution
+取消、超时、本机暂停或撤销会请求终止已知附着任务；脱离进程树的后代不保证终止。云端令牌撤销不保证立即停止已运行命令，取消不回滚影响。服务仅传必要环境变量，但不能隔离同一用户读取自身秘密。
 
-`terminal_execute/status/cancel` require a scoped connection with `terminal:execute`, a directly writable existing share, and a separately confirmed native terminal grant bound to that exact connection and root. Legacy grants and file-only OAuth tokens cannot execute. The scope is displayed during normal OAuth authorization; changing the local toggle cannot silently upgrade tokens. Old agents without terminal capability are not sent commands.
+## 4. 数据与传输
 
-This is **not an OS sandbox**. Shell commands run as the desktop user and may access paths outside cwd, delete files, create detached descendants, and use the network. Only intended starting cwd, shell selection, input/output limits, credentials passed by the service, launch concurrency, and request identity are constrained. Use only with a trusted client and explicit task intent. Do not promise file-tool backups or filesystem confinement for shell side effects.
+网关可见转发的文件正文，不提供针对网关运营者的端到端加密。代码不主动把文件正文持久化为云端业务记录；OAuth、权限、哈希及有界协调状态会保存。禁止开启载荷日志后仍声称正文未记录。
 
-Reservations are durably stored before spawn. Reusing a request ID cannot launch a second process, including after network response loss. After agent restart, unfinished records are marked interrupted/unknown rather than replayed. Output is bounded; the private command journal can contain sensitive stdout/stderr and must not be published. Reaching the bounded journal capacity refuses new commands rather than deleting anti-replay evidence.
+Windows 使用 CurrentUser DPAPI 保护敏感应用状态；其他平台目前依靠严格用户文件权限，不等同于 OS 密钥链加密。终端输出、备份和审计日志可能含敏感信息，不公开上传。
 
-Cancellation/timeout requests attached process-tree termination; detached descendants may survive. Revoking a cloud token does not necessarily stop a previously running native command immediately. Cancellation does not roll back effects. The runtime environment passed to the shell is limited, but same-user commands can still read secrets available to that OS user. Local management denies silent terminal enabling; native test/CI simulations do not establish end-user consent.
+## 5. 撤销与恢复
 
-## Installation and source releases
+目录变更须在本机明确确认后持久化，再激活云端范围。撤销时本机先停止对应访问；云端失败保留同请求恢复，不重新授予已撤销权限。
 
-Public releases are built from an explicit source allowlist, with scanning for known deployment identifiers and credential-like strings. Private deployment config, operator vaults, device identities, internal handoff records, downloads and logs are excluded. This is an engineering guard, not a guarantee that an arbitrary edited file contains no secret.
+网络重连不重放写入。未知写入先读回，未知终端任务先查原请求。关闭浏览器、退出程序、暂停、撤销共享和删除文件不是同一操作。
 
-Public bootstraps download fixed-version source archives and official Node archives over HTTPS and verify SHA-256 before execution. Checksums distributed by the same trusted host do not substitute for independent application signing or a compromised-publisher defense. Mac application signing/notarization and independent reproducible-build verification are not complete.
+仍允许其他非沙箱终端时，撤销一个文件目录不保证操作系统级隔离。
 
-An update installs a separate version, refuses to stop unknown/busy local listeners, requests normal authenticated shutdown of the exact idle app, and verifies saved state is retained. It does not kill unrelated processes, change proxy settings, reset folder permissions or silently enable startup. If startup or verification fails, old program files and user data are retained for recovery; automatic rollback is not claimed.
+## 6. 安装与发布
 
-## Remaining risks
+公开源码使用白名单，排除部署配置、凭据、内部交接、下载、日志与本机状态。扫描包括通用特征和构建机上的私有值输入；规则自身不保存维护者具体设备信息。扫描是防护措施，不是任意源码无秘密的形式化证明。
 
-Path checks are not an operating-system sandbox and cannot isolate same-user malware. Residual path-based races require further hardening. Windows stores sensitive app state with CurrentUser DPAPI; non-Windows storage currently relies on restrictive per-user file permissions rather than OS-backed encryption. Backups consume disk space and lack a complete retention/restore UI.
+入口通过 HTTPS 下载固定版源码与官方 Node 包，并核验 SHA-256。同源校验不替代独立签名或防御已失陷的发布账号。应用签名、公证及独立可复现构建尚未完成。
 
-The supported MCP profile, provider adapter and browser tests do not certify every MCP client, operating system, corporate proxy or clean cloud account. Physical Windows and Mac access has been demonstrated for earlier releases; batch management and setup changes require their own acceptance. Whole-machine restart, unattended lifetime recovery and independent security review remain explicit release gates.
+升级保留旧版本与用户配置，只允许经过认证的空闲已知进程正常退出；不批量杀进程，不改变代理、身份、目录权限或自启偏好。保留旧文件不等于自动回滚已完成。
 
-Report suspected vulnerabilities privately before disclosing working attack details. Never attach installation passwords, OAuth tokens, device keys, vault files or live deployment configuration to a public issue.
+新的脱敏发布不会自动清理旧 Git 提交、旧标签、旧 Release、fork 或缓存；这些范围需独立核查。
+
+## 7. 漏洞与验收
+
+发现有效凭据泄漏时，优先由所有者撤销或轮换；不要先把可用凭据和复现载荷发布到公开 Issue。报告先提供脱敏后的版本、接口、影响和复现步骤，采用维护者提供的私密渠道沟通。
+
+全新第三方云账号、所有系统版本、真实整机重启、长期无人值守及外部安全审计未全部验收。既有 Windows/Mac 实际访问记录和隔离测试不能替代这些验收。

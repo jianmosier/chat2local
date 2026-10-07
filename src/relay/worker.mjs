@@ -15,6 +15,7 @@ import { oidcConfiguration } from './oidc-login.mjs';
 import { instanceRoute, instanceAuthorize } from './instance-http.mjs';
 import { publicBootstrap } from '../shared/public-bootstrap.mjs';
 import { installRoute } from './install-http.mjs';
+import { requestBudget, REQUEST_BUDGET_VERSION } from './request-budget.mjs';
 export { Device, Registry };
 
 const DEFAULT_SCOPES = ['files:read', 'files:propose'];
@@ -34,7 +35,7 @@ const device = (env, id) => env.DEVICES.get(env.DEVICES.idFromName(id));
 const internal = (stub, route, value) => stub.fetch(new Request(`http://internal${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }));
 async function unpack(response) {
   const value = await response.json();
-  if (!response.ok) throw Object.assign(new Error(value.error || 'Relay operation failed.'), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(value.error || 'Relay operation failed.'), { status: response.status, retryAfterSeconds: value.retryAfterSeconds });
   return value;
 }
 
@@ -60,7 +61,7 @@ class McpApi extends WorkerEntrypoint {
 const authHandler = {
   async fetch(request, env) {
     const url = new URL(request.url); const origin = effectiveOrigin(request, env);
-    if (url.pathname === '/healthz' && request.method === 'GET') return json({ ok: true, name: 'chat2local-relay', version: VERSION, deployment: 'self-hosted-preview' });
+    if (url.pathname === '/healthz' && request.method === 'GET') return json({ ok: true, name: 'chat2local-relay', version: VERSION, deployment: 'self-hosted-preview', requestBudgetVersion: REQUEST_BUDGET_VERSION });
     if (url.pathname === '/setup-info' && request.method === 'GET') {
       let accountLoginConfigured = false;
       if (env.ACCOUNT_CONNECTIONS === 'true') { try { oidcConfiguration(env, origin); accountLoginConfigured = true; } catch { /* Report unavailable, never fall back to weaker identity. */ } }
@@ -198,7 +199,7 @@ export default {
       if (sentOrigin && sentOrigin !== origin) return json({ error: 'Untrusted Origin.' }, 403);
       if (request.headers.get('Sec-Fetch-Site') === 'cross-site' && request.method !== 'GET') return json({ error: 'Cross-site mutation refused.' }, 403);
       const url = new URL(request.url);
-      const bucket = url.pathname === '/oauth/register' ? 'register' : url.pathname === '/authorize' ? 'authorize' : url.pathname === '/oauth/token' ? 'token' : url.pathname === '/enroll' ? 'enroll' : (url.pathname === '/enroll-device' || url.pathname === '/install/start' || url.pathname.startsWith('/link/') || url.pathname.startsWith('/account/') || url.pathname.startsWith('/instance/')) ? 'setup' : null;
+      const bucket = requestBudget(url.pathname, request.method);
       if (bucket) await unpack(await internal(registry(env), '/budget', { bucket }));
       if (request.method === 'POST') {
         const body = await readLimited(request, url.pathname === '/mcp' ? undefined : 16 * 1024);
@@ -209,7 +210,8 @@ export default {
       // Detailed diagnostics are restricted to synthetic loopback tests, never deployment.
       if (env.TEST_DIAGNOSTICS === 'true' && env.ALLOW_LOOPBACK === 'true' && ['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname)) console.error(error.stack);
       // Normal deployments never log tokens, pair codes, bodies, or auth URLs.
-      response = json({ error: error.status ? error.message : 'Request rejected. Verify relay configuration and authorization parameters.' }, error.status ?? 400);
+      const retryAfterSeconds = error.status === 429 && Number.isInteger(error.retryAfterSeconds) && error.retryAfterSeconds > 0 && error.retryAfterSeconds <= 3600 ? error.retryAfterSeconds : null;
+      response = json({ error: error.status ? error.message : 'Request rejected. Verify relay configuration and authorization parameters.', ...(retryAfterSeconds ? { retryAfterSeconds } : {}) }, error.status ?? 400, retryAfterSeconds ? { 'Retry-After': String(retryAfterSeconds) } : {});
     }
     if (response.status === 101) return response;
     const headers = new Headers(response.headers);

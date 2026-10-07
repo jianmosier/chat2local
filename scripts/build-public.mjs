@@ -2,31 +2,54 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import { packageEntries, writeTarGz } from './archive.mjs';
 import { VERSION } from '../src/shared/protocol.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export const excludedScripts = new Set(['build-mac-codex-handoff.mjs', 'export-mac-handoff.mjs', 'stage-mac-handoff.mjs', 'publish-public.mjs']);
+export const publicDocuments = Object.freeze([
+  'docs/GETTING_STARTED.md', 'docs/QUICKSTART.zh-CN.txt', 'docs/ARCHITECTURE.md',
+  'docs/OPERATIONS.md', 'docs/PERMISSIONS.md', 'docs/TERMINAL.md',
+  'docs/REQUEST_BUDGET.md', 'docs/RELEASE.md', 'docs/CHANGELOG.md',
+]);
 export function inspectPublicText(relative, text, privateValues = []) {
-  if (privateValues.some(value => value && value.length >= 8 && text.includes(value))) throw Error(`Private deployment value found in ${relative}; publication stopped.`);
+  const normalized = text.replaceAll('\\.', '.').replaceAll('\\\\', '\\');
+  if (privateValues.some(value => typeof value === 'string' && value.length >= 4 && (text.includes(value) || normalized.includes(value)))) throw Error(`Private deployment value found in ${relative}; publication stopped.`);
   if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{35,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-proj-[A-Za-z0-9_-]{30,}/.test(text)) throw Error(`Credential-like content found in ${relative}; publication stopped.`);
-  if (/\b[A-Za-z]:[\\/]02Code[\\/]|DESKTOP-[A-Z0-9]{7}|[A-Za-z0-9][A-Za-z0-9-]{0,62}\.local|chat2local-relay-[a-f0-9]{6}\.chat2local-[a-f0-9]{6}\.workers\.dev/.test(text)) throw Error(`Personal installation metadata found in ${relative}; publication stopped.`);
+  // Generic machine-name patterns only. Actual owner values stay on the build host.
+  const machine = /\b(?:DESKTOP|LAPTOP)-[A-Z0-9]{7}\b|\b[A-Z][A-Z0-9-]{2,62}\.local(?![\w.-])/.test(normalized);
+  const hostLiteral = /["'`][a-z0-9][a-z0-9-]{2,62}\.local(?=["'`/])|https?:\/\/[a-z0-9][a-z0-9-]{2,62}\.local\b|^[a-z0-9][a-z0-9-]{2,62}\.local$/im.test(normalized);
+  if (machine || hostLiteral) throw Error(`Personal installation metadata found in ${relative}; publication stopped.`);
+}
+export async function privatePublicationValues(directory = root) {
+  const values = [os.hostname(), os.homedir(), os.homedir().replaceAll('\\', '/')];
+  try {
+    const config = JSON.parse(await fs.readFile(path.join(directory, 'wrangler.local.jsonc'), 'utf8'));
+    values.push(config.account_id, config.vars?.PUBLIC_ORIGIN, ...(config.kv_namespaces || []).map(n => n.id));
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  // Optional private values for other devices; never part of the public allowlist.
+  try {
+    const file = path.join(directory, '.artifacts', 'publication-private-values.json');
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536) throw Error('Unsafe private publication input.');
+    const additional = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (!Array.isArray(additional) || additional.some(value => typeof value !== 'string' || value.length < 4)) throw Error('Invalid private publication input.');
+    values.push(...additional);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return [...new Set(values.filter(value => typeof value === 'string' && value.length >= 4))];
 }
 export async function buildPublic(output = path.join(root, '.artifacts', 'public-' + VERSION)) {
   output = path.resolve(output);
   try { await fs.lstat(output); throw Error('Public output already exists; choose a new output.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const files = ['.gitignore','README.md','LICENSE','SECURITY.md','package.json','package-lock.json','tsconfig.json','wrangler.jsonc','install.sh','install.ps1','start-chat2local.cmd','start-chat2local.sh','docs/GETTING_STARTED.md','docs/QUICKSTART.zh-CN.txt','docs/TERMINAL.md','docs/RELEASE.md'];
+  const files = ['.gitignore','README.md','LICENSE','SECURITY.md','package.json','package-lock.json','tsconfig.json','wrangler.jsonc','install.sh','install.ps1','start-chat2local.cmd','start-chat2local.sh', ...publicDocuments];
   for (const folder of ['src','scripts','tests']) for (const file of await packageEntries(path.join(root, folder), folder + '/')) {
     if (folder === 'scripts' && excludedScripts.has(path.basename(file))) continue;
     if (file === 'tests/mac-handoff.test.mjs') continue;
     files.push(file);
   }
-  let privateValues = [];
-  try {
-    const config = JSON.parse(await fs.readFile(path.join(root, 'wrangler.local.jsonc'), 'utf8'));
-    privateValues = [config.account_id, config.vars?.PUBLIC_ORIGIN, ...(config.kv_namespaces || []).map(n => n.id)].filter(Boolean);
-  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const privateValues = await privatePublicationValues();
   const bytesByName = new Map();
   for (const relative of files) {
     const file = path.join(root, relative), stat = await fs.lstat(file);
