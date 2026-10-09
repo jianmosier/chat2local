@@ -73,7 +73,12 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   assert.equal(await pageA.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
   await fs.mkdir('.artifacts', { recursive: true }); await pageA.screenshot({ path: '.artifacts/private-instance-one-consent.png', fullPage: true });
   pageA.on('request', r => { if (new URL(r.url()).pathname === '/instance-connect/confirm') confirmationsA++; });
-  await pageA.locator('#account-confirm').click(); await pageA.waitForURL(callback + '*', { timeout: 30000 });
+  await pageA.locator('#account-confirm').click();
+  await pageA.waitForURL(callback + '*', { timeout: 30000 }).catch(error => {
+    // Fixture diagnostics only: never print OAuth query strings, tokens or page bodies.
+    t.diagnostic(JSON.stringify({ stage: 'initial-oauth-callback', pathname: new URL(pageA.url()).pathname, confirmations: confirmationsA, pageErrors: errors.length, recentResponses: trace.slice(-25) }));
+    throw error;
+  });
   assert.equal(confirmationsA, 1); assert.equal(contextA.pages().length, 1); assert.equal(new URL(pageA.url()).searchParams.get('state'), state);
   const tokens = await data(await fetch(origin + '/oauth/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.client_id, redirect_uri: callback, code: new URL(pageA.url()).searchParams.get('code'), code_verifier: verifier, resource: origin + '/mcp' }) }));
   const call = async (name, args = {}) => (await data(await post(origin + '/mcp', { jsonrpc: '2.0', id: secret(), method: 'tools/call', params: { name, arguments: args } }, { Authorization: 'Bearer ' + tokens.access_token }))).result;

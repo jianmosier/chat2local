@@ -1,6 +1,6 @@
 param([string]$Instance)
 $ErrorActionPreference = 'Stop'
-$Version = '0.1.0-alpha.24'
+$Version = '0.1.0-alpha.26'
 $Repository = 'jianmosier/chat2local'
 $NodeVersion = 'v24.21.0'
 if ($env:OS -ne 'Windows_NT' -or [Environment]::OSVersion.Version.Major -lt 10) { throw 'Windows 10 or newer is required.' }

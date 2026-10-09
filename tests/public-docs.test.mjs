@@ -11,11 +11,16 @@ import { VERSION } from '../src/shared/protocol.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 test('public documentation links and versions match the exported contract', async () => {
-  const files = ['README.md', 'SECURITY.md', ...publicDocuments];
+  assert.deepEqual(publicDocuments, ['README.md']);
+  const files = [...publicDocuments];
   const allowed = new Set(files);
   for (const relative of files) {
     const text = await fs.readFile(path.join(root, relative), 'utf8');
-    if (relative !== 'SECURITY.md') assert.ok(text.includes(VERSION), relative + ' lacks the current version');
+    assert.ok(text.includes(VERSION), relative + ' lacks the current version');
+    for (const heading of ['## 1. 首次配对', '## 2. 回连', '## 3. 多设备连接', '## 4. 管理']) assert.ok(text.includes(heading), heading);
+    assert.equal((text.match(/^## /gm) || []).length, 4);
+    assert.ok(text.includes('child_process.spawn'));
+    assert.ok(text.includes('终端不是操作系统沙箱')); 
     for (const link of text.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
       const target = link[1].split('#')[0];
       if (!target || /^[a-z]+:/i.test(target)) continue;
@@ -48,6 +53,9 @@ test('public export includes current docs and passes its independent read-only t
   const report = await buildPublic(path.join(base, 'export'));
   const manifest = JSON.parse(await fs.readFile(path.join(report.directory, 'SOURCE-SHA256.json')));
   for (const doc of publicDocuments) assert.ok(manifest.files[doc], doc);
+  assert.deepEqual(Object.keys(manifest.files).filter(name => /\.(?:md|txt)$/.test(name)), ['README.md']);
+  assert.ok(manifest.files.LICENSE);
+  assert.equal(Object.keys(manifest.files).some(name => name.startsWith('docs/')), false);
   assert.ok(manifest.files['src/relay/request-budget.mjs']);
   assert.equal(manifest.files['wrangler.local.jsonc'], undefined);
   const audit = await auditTree(report.directory);
@@ -73,6 +81,13 @@ test('history audit detects a deleted synthetic secret and does not change the c
   assert.equal(JSON.stringify(result).includes(secret), false);
   assert.equal(git(['rev-parse', 'HEAD']).toString(), before);
   assert.equal(git(['status', '--porcelain']).toString(), '');
+});
+test('portable builds use the same README without requiring private documentation', async () => {
+  const build = await fs.readFile(path.join(root, 'scripts/build-portable.mjs'), 'utf8');
+  assert.ok(build.includes("fs.copyFile(path.join(root, 'README.md'), path.join(output, 'README.md'))"));
+  assert.equal(build.includes('QUICKSTART.zh-CN.txt'), false);
+  const verification = await fs.readFile(path.join(root, 'scripts/release-artifacts.mjs'), 'utf8');
+  assert.equal(verification.includes('docs/'), false);
 });
 test('bundled help documents current installation and terminal boundaries', async () => {
   const html = await fs.readFile(path.join(root, 'src/agent/ui/self-host.html'), 'utf8');

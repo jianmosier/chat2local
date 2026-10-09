@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { chromium } from 'playwright-core';
@@ -15,8 +15,7 @@ const secret = () => randomBytes(32).toString('hex');
 async function data(response, status = 200) { assert.equal(response.status, status, await response.clone().text()); return response.json(); }
 async function until(check) { const end = Date.now() + 15000; while (Date.now() < end) { if (await check()) return; await new Promise(r => setTimeout(r, 50)); } throw new Error('Fixture did not become ready.'); }
 async function controller(options) {
-  for (let i = 0; i < 12; i++) { try { return await startController({ ...options, port: randomInt(49152, 65535) }); } catch (e) { if (e.code !== 'EADDRINUSE') throw e; } }
-  throw new Error('No isolated test port available.');
+  return startController({ ...options, port: 0 });
 }
 
 test('original enrolled Windows recovery: NO invitation, NO picker, ONE client consent, unchanged directories/identity and real scoped read/write', { timeout: 120000 }, async t => {
@@ -47,13 +46,9 @@ test('original enrolled Windows recovery: NO invitation, NO picker, ONE client c
   await until(() => app.bridge.state === 'connected');
   const before = await store.load(); assert.equal(before.secrets.privateInstanceInvitation, undefined);
   const callbackServer = http.createServer((_request, response) => { response.writeHead(200, { 'Content-Type': 'text/plain' }); response.end('Original client callback'); });
-  let callbackPort;
-  for (let i = 0; i < 12; i++) {
-    callbackPort = randomInt(49152, 65535);
-    try { await new Promise((resolve, reject) => { callbackServer.once('error', reject); callbackServer.listen(callbackPort, '127.0.0.1', () => { callbackServer.removeListener('error', reject); resolve(); }); }); break; } catch (e) { if (e.code !== 'EADDRINUSE') throw e; }
-  }
   t.after(() => new Promise(resolve => { callbackServer.close(resolve); callbackServer.closeIdleConnections(); }));
-  const callback = `http://127.0.0.1:${callbackPort}/callback`;
+  await new Promise((resolve, reject) => { callbackServer.once('error', reject); callbackServer.listen(0, '127.0.0.1', () => { callbackServer.removeListener('error', reject); resolve(); }); });
+  const callback = `http://127.0.0.1:${callbackServer.address().port}/callback`;
   const client = await data(await fetch(origin + '/oauth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_name: 'Original test client', redirect_uris: [callback], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) }), 201);
   const verifier = secret(), state = secret();
   const query = new URLSearchParams({ client_id: client.client_id, redirect_uri: callback, response_type: 'code', scope: 'files:read files:write offline_access', state, code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url'), resource: origin + '/mcp' });

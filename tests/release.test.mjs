@@ -70,6 +70,38 @@ test('publication clone preserves manifest bytes with inherited CRLF settings an
   await fs.writeFile(path.join(target,'README.md'),'changed after clone\n');
   await assert.rejects(() => checkSource(target,path.join(target,'SOURCE-SHA256.json')), /Existing source was modified: README.md/);
 });
+test('task preparation and retry never add publication arguments', { timeout: 30000 }, async t => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-prepare-task-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  await fs.mkdir(path.join(base, 'scripts'));
+  await fs.mkdir(path.join(base, 'src/shared'), { recursive: true });
+  await fs.mkdir(path.join(base, '.artifacts'));
+  await fs.copyFile('scripts/release-task.mjs', path.join(base, 'scripts/release-task.mjs'));
+  await fs.writeFile(path.join(base, 'src/shared/protocol.mjs'), "export const VERSION = 'fixture';\n");
+  const entry = path.join(base, 'scripts/release-task.mjs');
+  const taskFile = path.join(base, '.artifacts/release-task-fixture/task.json');
+  const progress = path.join(base, '.artifacts/release-task-fixture/progress.log');
+  const invoke = mode => execFileAsync(process.execPath, [entry, mode, 'fixture/chat2local'], { cwd: base, windowsHide: true, timeout: 5000 });
+  const finished = async () => {
+    for (let i = 0; i < 150; i++) {
+      const task = JSON.parse(await fs.readFile(taskFile, 'utf8'));
+      if (['completed','failed'].includes(task.state)) return task;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw Error('Isolated task fixture did not complete.');
+  };
+  // The fixture executable only reports arguments; it cannot publish anything.
+  await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 1;');
+  await invoke('prepare');
+  assert.equal((await finished()).state, 'failed');
+  assert.equal((await fs.readFile(progress, 'utf8')).trim(), '[]');
+  await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2)));');
+  await invoke('retry');
+  const task = await finished();
+  assert.equal(task.state, 'completed'); assert.equal(task.action, 'prepare');
+  assert.equal(task.exitCode, 0); assert.equal(task.timedOut, false);
+  assert.equal((await fs.readFile(progress, 'utf8')).trim(), '[]');
+});
 test('release publication code pins commit, verifies downloaded assets and never force-pushes or clobbers', async () => {
   const source=await fs.readFile('scripts/release.mjs','utf8');
   assert.match(source,/--target',commit/);assert.match(source,/--draft/);assert.match(source,/release','download/);

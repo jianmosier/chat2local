@@ -9,11 +9,8 @@ import { VERSION } from '../src/shared/protocol.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export const excludedScripts = new Set(['build-mac-codex-handoff.mjs', 'export-mac-handoff.mjs', 'stage-mac-handoff.mjs', 'publish-public.mjs']);
-export const publicDocuments = Object.freeze([
-  'docs/GETTING_STARTED.md', 'docs/QUICKSTART.zh-CN.txt', 'docs/ARCHITECTURE.md',
-  'docs/OPERATIONS.md', 'docs/PERMISSIONS.md', 'docs/TERMINAL.md',
-  'docs/REQUEST_BUDGET.md', 'docs/RELEASE.md', 'docs/CHANGELOG.md',
-]);
+// Public product documentation has one source; internal notes are not exported.
+export const publicDocuments = Object.freeze(['README.md']);
 export function inspectPublicText(relative, text, privateValues = []) {
   const normalized = text.replaceAll('\\.', '.').replaceAll('\\\\', '\\');
   if (privateValues.some(value => typeof value === 'string' && value.length >= 4 && (text.includes(value) || normalized.includes(value)))) throw Error(`Private deployment value found in ${relative}; publication stopped.`);
@@ -43,7 +40,7 @@ export async function privatePublicationValues(directory = root) {
 export async function buildPublic(output = path.join(root, '.artifacts', 'public-' + VERSION)) {
   output = path.resolve(output);
   try { await fs.lstat(output); throw Error('Public output already exists; choose a new output.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const files = ['.gitignore','README.md','LICENSE','SECURITY.md','package.json','package-lock.json','tsconfig.json','wrangler.jsonc','install.sh','install.ps1','start-chat2local.cmd','start-chat2local.sh', ...publicDocuments];
+  const files = ['.gitignore','LICENSE','package.json','package-lock.json','tsconfig.json','wrangler.jsonc','install.sh','install.ps1','start-chat2local.cmd','start-chat2local.sh', ...publicDocuments];
   for (const folder of ['src','scripts','tests']) for (const file of await packageEntries(path.join(root, folder), folder + '/')) {
     if (folder === 'scripts' && excludedScripts.has(path.basename(file))) continue;
     if (file === 'tests/mac-handoff.test.mjs') continue;

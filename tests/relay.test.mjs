@@ -10,24 +10,34 @@ import { startController } from '../src/agent/main.mjs';
 import { guideProbe } from '../src/agent/connection-guide.mjs';
 
 const secret = () => randomBytes(32).toString('hex');
+// Opt-in fixture-stage diagnostics contain no URLs, tokens or file contents.
+const trace = message => { if (process.env.CHAT2LOCAL_TEST_TRACE === '1') console.error(`[relay-test ${new Date().toISOString()}] ${message}`); };
 async function unpack(response, expected = 200) { assert.equal(response.status, expected, await response.clone().text()); return response.json(); }
 async function until(check) { const end = Date.now() + 8000; while (Date.now() < end) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 40)); } throw new Error('Condition timed out.'); }
 
 test('Cloudflare runtime: OAuth, device bridge and locally approved write end-to-end', { timeout: 90000 }, async t => {
+  t.beforeEach(context => trace('subtest start: ' + context.name));
+  t.afterEach(context => trace('subtest ended: ' + context.name));
+  trace('bundle: start');
   const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  trace('bundle: ready');
   const enrollmentKey = secret();
   const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
     host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'],
     durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } },
     bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey },
   }));
-  t.after(() => mf.dispose());
+  t.after(async () => { trace('runtime cleanup: start'); await mf.dispose(); trace('runtime cleanup: done'); });
+  trace('runtime: starting');
   const origin = (await mf.ready).origin;
+  trace('runtime: ready');
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'chat2local-relay-test-'));
   const root = path.join(base, 'project'); await fs.mkdir(root);
   await fs.writeFile(path.join(root, 'example.txt'), 'Before approval.\n');
+  trace('first controller: starting');
   const app = await startController({ port: 0, stateDir: path.join(base, 'private'), demoDir: path.join(base, 'demo'), allowLocalRelay: true });
-  t.after(async () => { await app.close(); await fs.rm(base, { recursive: true, force: true }); });
+  trace('first controller: ready');
+  t.after(async () => { trace('first controller cleanup: start'); await app.close(); await fs.rm(base, { recursive: true, force: true }); trace('first controller cleanup: done'); });
   const local = (route, value) => fetch(`${app.origin}/api/${route}`, { method: value === undefined ? 'GET' : 'POST', headers: { 'X-Chat2Local-Token': app.token, Origin: app.origin, 'Content-Type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
   const permission = await unpack(await local('root/add', { path: root, write: true }));
   const formPost = (url, value, extra = {}) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...extra }, body: new URLSearchParams(value), redirect: 'manual' });
@@ -204,8 +214,10 @@ test('Cloudflare runtime: OAuth, device bridge and locally approved write end-to
   let otherToken; let otherRoot;
   await t.test('two computers remain isolated even under the same relay operator', async () => {
     const secondFolder = path.join(base, 'second-project'); await fs.mkdir(secondFolder);
+    trace('second controller: starting');
     const second = await startController({ port: 0, stateDir: path.join(base, 'second-private'), allowLocalRelay: true });
-    t.after(() => second.close());
+    trace('second controller: ready');
+    t.after(async () => { trace('second controller cleanup: start'); await second.close(); trace('second controller cleanup: done'); });
     const secondLocal = (route, value) => fetch(`${second.origin}/api/${route}`, { method: 'POST', headers: { 'X-Chat2Local-Token': second.token, Origin: second.origin, 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
     otherRoot = await unpack(await secondLocal('root/add', { path: secondFolder, write: false }));
     await unpack(await secondLocal('enroll', { origin, enrollmentToken: enrollmentKey }));

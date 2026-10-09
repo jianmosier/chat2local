@@ -75,7 +75,7 @@ export async function buildPortable(name, targetKey = `${process.platform}-${pro
     await fs.writeFile(executablePath, executable, { mode: 0o755 });
     await fs.writeFile(path.join(output, 'runtime', 'LICENSE.txt'), runtimeLicense);
     if (target.nodePlatform !== 'win') await fs.chmod(path.join(output, 'start-chat2local.sh'), 0o755);
-    await fs.copyFile(path.join(root, 'docs', 'QUICKSTART.zh-CN.txt'), path.join(output, '开始使用.txt'));
+    await fs.copyFile(path.join(root, 'README.md'), path.join(output, 'README.md'));
     const manifest = { product: 'Chat2Local', version: VERSION, platform: targetKey, runtime: NODE_VERSION, runtimeSource: distribution + target.archiveName, runtimeArchiveSha256: expected, files: {} };
     for (const relative of await packageEntries(output)) manifest.files[relative] = digest(await fs.readFile(path.join(output, relative)));
     await fs.writeFile(path.join(output, 'BUILD-MANIFEST.json'), JSON.stringify(manifest, null, 2));

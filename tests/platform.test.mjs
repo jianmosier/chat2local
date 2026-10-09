@@ -19,11 +19,12 @@ test('platform metadata is descriptive, not a hostname-based authorization ident
   assert.equal(platformInfo({ platform: 'win32' }).system, 'Windows');
   assert.equal(platformInfo({ platform: 'linux' }).system, 'Linux');
 });
+// Explicitly fictional user paths; no owner or installed state is inspected.
 test('each OS uses a per-user state location, without inheriting Windows path rules', () => {
-  assert.equal(stateDirectory({ platform: 'win32', home: 'C:\\Users\\Jack', env: {} }), 'C:\\Users\\Jack\\AppData\\Local\\Chat2Local');
-  assert.equal(stateDirectory({ platform: 'darwin', home: '/Users/jack', env: {} }), '/Users/jack/Library/Application Support/Chat2Local');
-  assert.equal(stateDirectory({ platform: 'linux', home: '/home/jack', env: {} }), '/home/jack/.local/state/chat2local');
-  assert.equal(stateDirectory({ platform: 'linux', home: '/home/jack', env: { XDG_STATE_HOME: '/data/state' } }), '/data/state/chat2local');
+  assert.equal(stateDirectory({ platform: 'win32', home: 'C:\\Users\\fixture-user', env: {} }), 'C:\\Users\\fixture-user\\AppData\\Local\\Chat2Local');
+  assert.equal(stateDirectory({ platform: 'darwin', home: '/Users/fixture-user', env: {} }), '/Users/fixture-user/Library/Application Support/Chat2Local');
+  assert.equal(stateDirectory({ platform: 'linux', home: '/home/fixture-user', env: {} }), '/home/fixture-user/.local/state/chat2local');
+  assert.equal(stateDirectory({ platform: 'linux', home: '/home/fixture-user', env: { XDG_STATE_HOME: '/data/state' } }), '/data/state/chat2local');
 });
 test('existing POSIX identity is reused and conflicting configurations are not silently merged', async t => {
   const home = await temporary(t); const options = { platform: 'linux', home, env: {} };
@@ -48,16 +49,16 @@ test('private state stays blocked when a parent path is an OS alias/junction', a
   await assert.rejects(() => approveRoot(path.join(actual, 'private'), path.join(alias, 'private'), true), /private state/);
 });
 test('macOS login job has escaped argv, user scope, and no looping background restart', () => {
-  const plan = posixStartupPlan({ platform: 'darwin', home: '/Users/jack', node: '/Users/jack/App & Tools/runtime/node', launcher: '/Users/jack/App & Tools/scripts/launch.mjs' });
-  assert.equal(plan.file, '/Users/jack/Library/LaunchAgents/io.chat2local.agent.plist');
+  const plan = posixStartupPlan({ platform: 'darwin', home: '/Users/fixture-user', node: '/Users/fixture-user/App & Tools/runtime/node', launcher: '/Users/fixture-user/App & Tools/scripts/launch.mjs' });
+  assert.equal(plan.file, '/Users/fixture-user/Library/LaunchAgents/io.chat2local.agent.plist');
   assert.match(plan.content, /App &amp; Tools/); assert.match(plan.content, /<key>RunAtLoad<\/key><true\/>/);
   assert.match(plan.content, /<string>--no-browser<\/string>/); assert.doesNotMatch(plan.content, /KeepAlive|sudo|deviceKey|token/);
 });
 test('Linux desktop startup escapes field codes and does not interpolate a shell command', () => {
-  const plan = posixStartupPlan({ platform: 'linux', home: '/home/jack', env: {}, node: '/opt/50% $tools/node', launcher: '/opt/App Name/scripts/launch.mjs' });
-  assert.equal(plan.file, '/home/jack/.config/autostart/chat2local.desktop');
+  const plan = posixStartupPlan({ platform: 'linux', home: '/home/fixture-user', env: {}, node: '/opt/50% $tools/node', launcher: '/opt/App Name/scripts/launch.mjs' });
+  assert.equal(plan.file, '/home/fixture-user/.config/autostart/chat2local.desktop');
   assert.match(plan.content, /50%% \\\$tools/); assert.match(plan.content, /Terminal=false/); assert.match(plan.content, /--no-browser/);
-  assert.throws(() => posixStartupPlan({ platform: 'linux', home: '/home/u', node: '/node\nExec=bad', launcher: '/a.mjs' }));
+  assert.throws(() => posixStartupPlan({ platform: 'linux', home: '/home/fixture-user', node: '/node\nExec=bad', launcher: '/a.mjs' }));
 });
 test('repeat directory registration is idempotent and preserves existing review grants and IDs', async t => {
   const base = await temporary(t); const folder = path.join(base, 'sample'); await fs.mkdir(folder);

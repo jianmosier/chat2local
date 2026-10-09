@@ -16,8 +16,7 @@ export async function verifyReleaseInstaller(record, sourceDirectory) {
   const { manifest } = await verifyPackage(record.output, { target: record.target });
   for (const [name, digest] of Object.entries(manifest.files)) {
     if (['runtime/node','runtime/node.exe','runtime/LICENSE.txt'].includes(name)) continue;
-    const relative = name === '开始使用.txt' ? 'docs/QUICKSTART.zh-CN.txt' : name;
-    if (source.files[relative] !== digest) throw Error('Installer source is not the reviewed public snapshot: ' + relative);
+    if (source.files[name] !== digest) throw Error('Installer source is not the reviewed public snapshot: ' + name);
   }
   const archive = await fs.readFile(record.archive);
   if (archive.length !== record.bytes || sha(archive) !== record.sha256) throw Error('Installer archive changed.');

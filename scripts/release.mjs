@@ -38,7 +38,7 @@ export function validateRepository(repo, user, metadata, create) {
   if (metadata && (metadata.full_name !== repo || metadata.archived || metadata.visibility !== 'public' || metadata.permissions?.push !== true)) throw Error('Target is not a writable public repository. No visibility or permission was changed.');
 }
 export async function inputFingerprint(directory = root) {
-  const fixed=['package.json','package-lock.json','README.md','SECURITY.md','install.sh','install.ps1','wrangler.jsonc','.gitignore',...publicDocuments];
+  const fixed=['package.json','package-lock.json','install.sh','install.ps1','wrangler.jsonc','.gitignore',...publicDocuments];
   const names=[...fixed]; for(const sub of ['src','scripts','tests']) names.push(...await packageEntries(path.join(directory,sub),sub+'/'));
   const hash=createHash('sha256'); for(const name of names.sort()) {hash.update(name+'\0');hash.update(await fs.readFile(path.join(directory,name)));} return hash.digest('hex');
 }
@@ -122,7 +122,7 @@ export async function publishRelease(file,options) {
   await syncSnapshot(report.directory,work,previous);
   await checkSource(work,path.join(report.directory,'SOURCE-SHA256.json'));
   await git(['config','core.autocrlf','false']);await git(['add','--all']);
-  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: polling isolation, privacy checks and structured documentation`]);
+  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: consolidate README and refresh verified packages`]);
   const commit=await git(['rev-parse','HEAD']);if(!/^[a-f0-9]{40}$/.test(commit))throw Error('Commit was not verified.');
   if(!metadata)await run('gh',['repo','create',repo,'--public','--description','Self-hosted multi-device MCP access with explicit folder and terminal permissions.']);
   if(!branchHead)await git(['remote','add','origin',`https://github.com/${repo}.git`]);
@@ -130,7 +130,7 @@ export async function publishRelease(file,options) {
   const remote=await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`,'--jq','.object.sha']);
   if(remote!==commit)throw Error('Remote changed or push was not confirmed; no release created.');
   console.log('Release 4/4: upload draft assets, download them back, then publish.');
-  const notes=`Alpha preview ${VERSION}. Includes request-budget v2: authenticated device polling is isolated from anonymous setup and authorization. Removes owner-specific literals from public privacy rules, adds read-only public-tree/history audits, and synchronizes structured installation, pairing, reconnection, architecture, permissions and upgrade documentation, including the bundled help page. Matching source, Windows x64, macOS ARM64 and x64 packages; all downloaded assets are verified before publication. No DevSpace runtime dependency or permission expansion. Existing historical references/assets are not rewritten. Cloud deployment and each client's installed version require separate checks. Physical Mac update, full-machine reboot, clean-account setup and independent security review remain separate acceptance items.`;
+  const notes=`Alpha preview ${VERSION}. Consolidates public instructions into one README with four sections: first pairing, reconnecting, multiple devices and management. Public command examples use environment variables or fictional instance values while retaining working GitHub download URLs. Includes release-test fixture and prepare-task safeguards. Source, Windows x64, macOS ARM64 and x64 packages are freshly verified against the same source manifest; downloaded release assets are checked before publication. No new product features, Rust changes, DevSpace runtime dependency or permission expansion. Existing historical references/assets are not rewritten. Cloud deployment, private installation endpoints and each client's installed version require separate checks. Physical Mac update, full-machine reboot, clean-account setup and independent security review remain separate acceptance items.`;
   const assetFiles = releaseAssetFiles(report);
   await run('gh',['release','create',tag,...assetFiles,'--repo',repo,'--target',commit,'--draft','--prerelease','--title','chat2local '+VERSION,'--notes',notes]);
   const verify=path.join(path.dirname(file),'remote-assets');await fs.mkdir(verify);

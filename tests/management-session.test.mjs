@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { randomInt } from 'node:crypto';
 import { chromium } from 'playwright-core';
 import { ManagementSessions, managerRoute } from '../src/agent/management-session.mjs';
 import { startController } from '../src/agent/main.mjs';
@@ -49,14 +48,10 @@ async function fixture(t) {
     if (new URL(url).pathname === '/instance/manage/connections') return Response.json({ connections: [connection] });
     throw Error('Unexpected cloud request; this fixture cannot mutate cloud state.');
   } };
-  let app;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    try { app = await startController({ ...options, port: randomInt(49152, 65535) }); break; }
-    catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
-  }
-  assert.ok(app);
-  const browser = await chromium.launch({ channel: 'msedge', headless: true });
-  t.after(async () => { await browser.close(); await app.close(); await fs.rm(base, { recursive: true, force: true }); });
+  let app, browser;
+  t.after(async () => { await browser?.close(); await app?.close(); await fs.rm(base, { recursive: true, force: true }); });
+  app = await startController({ ...options, port: 0 });
+  browser = await chromium.launch({ channel: 'msedge', headless: true });
   return { store, root, browser, before, app: () => app, restart: async () => { const port = new URL(app.origin).port; await app.close(); app = await startController({ ...options, port: Number(port) }); } };
 }
 

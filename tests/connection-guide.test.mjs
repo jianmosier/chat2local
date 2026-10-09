@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID, randomInt } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright-core';
 import { Store } from '../src/agent/store.mjs';
 import { startController } from '../src/agent/main.mjs';
@@ -24,16 +24,11 @@ async function fixture(t, { mode = 'review', existing = true, registered = true 
   const bridge = { state: registered ? 'connected' : 'not-configured', start() { this.state = 'connected'; }, stop() { this.state = 'disconnected'; }, revokeIdentity: async () => ({ remoteRevoked: true }) };
   const opened = [];
   let app;
-  // This Windows host can assign port 1720 for port=0, which the browser refuses.
-  // Bind a fresh high port without disabling browser protections or touching
-  // any existing listener. Only genuine address-in-use conflicts are retried.
-  for (let attempt = 0; attempt < 12 && !app; attempt++) {
-    try { app = await startController({ port: randomInt(49152, 65536), store, bridge, defaultRelay: identity.origin, openBrowser: async url => opened.push(url), setupFetch: async () => new Response(null, { status: 404 }), networkOptions: { env: {}, systemProxy: async () => ({ proxy: '' }) } }); }
-    catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
-  }
-  if (!app) throw new Error('No unoccupied high test port found; existing listeners were not changed.');
+  t.after(async () => { await app?.close(); await fs.rm(base, { recursive: true, force: true }); });
+  // Let the OS select a bindable isolated port. Do not sample reserved ports
+  // or alter the production listener, browser safeguards or system settings.
+  app = await startController({ port: 0, store, bridge, defaultRelay: identity.origin, openBrowser: async url => opened.push(url), setupFetch: async () => new Response(null, { status: 404 }), networkOptions: { env: {}, systemProxy: async () => ({ proxy: '' }) } });
   const api = (route, body, extra = {}) => fetch(`${app.origin}/api/${route}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Chat2Local-Token': app.token, Origin: app.origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...extra }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  t.after(async () => { await app.close(); await fs.rm(base, { recursive: true, force: true }); });
   return { base, folder, other, root, store, app, api, opened };
 }
 const ok = async response => { assert.equal(response.status, 200, await response.clone().text()); return response.json(); };

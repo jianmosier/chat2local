@@ -3,7 +3,7 @@
 # checksum-verified runtime. Your gateway/account/folders are never embedded.
 set -eu
 umask 077
-version='0.1.0-alpha.24'
+version='0.1.0-alpha.26'
 repository='jianmosier/chat2local'
 node_version='v24.21.0'
 if [ "${1:-}" = '--help' ]; then
