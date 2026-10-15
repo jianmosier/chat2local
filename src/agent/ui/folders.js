@@ -1,3 +1,5 @@
+import { attachLifecycle } from './lifecycle.js';
+
 const $ = id => document.getElementById(id);
 if (/^#[a-f0-9]{64}$/.test(location.hash)) {
   sessionStorage.setItem('chat2local-control', location.hash.slice(1));
@@ -5,6 +7,7 @@ if (/^#[a-f0-9]{64}$/.test(location.hash)) {
 }
 let token = sessionStorage.getItem('chat2local-control') || '';
 let managementLocked = false;
+let stopped = false;
 const storageKey = 'chat2local-folder-draft';
 const labels = { direct: '读写', 'read-only': '只读', review: '逐次确认' };
 let state, connections = [], terminals = [], terminalKnown = false, pending = [], page, view, draft;
@@ -13,7 +16,7 @@ let autoTimer, lastSync = 0, refreshWork;
 const groupNodes = new Map(), expandedGroups = new Set();
 let choicesKey = '';
 function text(id, value) { const node = $(id); if (node.textContent !== value) node.textContent = value; }
-function isEditing() { return busy || folderDialog.open || terminalDialog.open || removeDialog.open || $('authorization-dialog').open; }
+function isEditing() { return busy || folderDialog.open || terminalDialog.open || removeDialog.open || $('authorization-dialog').open || $('shutdown-dialog').open; }
 const removeDialog = $('remove-dialog');
 const selected = () => connections.find(c => c.connectionId === $('connection').value);
 const folderDialog = $('folder-dialog'), terminalDialog = $('terminal-dialog');
@@ -60,13 +63,13 @@ async function status() {
   return response.json();
 }
 function controls() {
-  const frozen = busy || Boolean(draft), unavailable = managementLocked || !selected() || state?.paused;
+  const frozen = busy || Boolean(draft), unavailable = stopped || managementLocked || !selected() || state?.paused;
   $('open-add').disabled = busy || unavailable || Boolean(state && !selected()?.scopes.includes('files:write'));
   text('open-add', draft && !view?.connected ? '查看待处理' : '＋ 添加文件夹');
   $('connection').disabled = busy || folderDialog.open || terminalDialog.open || removeDialog.open || Boolean(draft);
-  $('refresh').disabled = busy || folderDialog.open || terminalDialog.open || removeDialog.open;
+  $('refresh').disabled = stopped || managementLocked || busy || folderDialog.open || terminalDialog.open || removeDialog.open;
   for (const id of ['close-remove','cancel-remove','confirm-remove']) $(id).disabled = busy || (id === 'confirm-remove' && !removePreview);
-  for (const node of document.querySelectorAll('[data-remove-button]')) node.disabled = busy || folderDialog.open || terminalDialog.open || removeDialog.open;
+  for (const node of document.querySelectorAll('[data-remove-button]')) node.disabled = stopped || managementLocked || busy || folderDialog.open || terminalDialog.open || removeDialog.open;
   $('prepare').disabled = busy || !pending.length || unavailable;
   text('prepare', busy ? '正在保存…' : draft ? '重试本次添加' : `共享${pending.length ? '（' + pending.length + '）' : ''}`);
   $('confirm').disabled = busy || !view?.requiresConsent;
@@ -81,35 +84,36 @@ function controls() {
   for (const node of document.querySelectorAll('#entries input')) node.disabled = frozen || node.dataset.shared === 'true';
   for (const node of document.querySelectorAll('#pending button,#pending select')) node.disabled = frozen;
   for (const node of document.querySelectorAll('[data-terminal-button]')) node.disabled = busy || !terminalKnown || unavailable || folderDialog.open;
+  renderLifecycle();
 }
-function renderLifecycle() {
-  const toggle = $('login-startup');
-  toggle.checked = state?.startup === true;
-  toggle.disabled = busy || managementLocked || state?.startupAvailable !== true;
-  const mac = state?.device?.platform === 'darwin' || /Macintosh/.test(navigator.userAgent);
-  const windows = state?.device?.platform === 'win32' || /Windows/.test(navigator.userAgent);
-  $('daily-entry').value = mac ? 'open "$HOME/Applications/Chat2Local.command"' : windows ? '%LOCALAPPDATA%\\Chat2Local\\Chat2Local.cmd' : '打开已安装的 Chat2Local.command';
-  let origin;
-  try { const url = new URL(state?.relay || state?.setupOrigin); if (url.protocol !== 'https:' || url.href !== url.origin + '/') throw Error(); origin = url.origin; } catch { $('update-command').value = '实例未配置'; $('copy-update').disabled = true; return; }
-  $('copy-update').disabled = false;
-  $('update-command').value = windows
-    ? `& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/jianmosier/chat2local/main/install.ps1'))) -Instance '${origin}'`
-    : `curl -fS --proto '=https' --connect-timeout 20 --max-time 60 '${origin}/install.sh' | sh`;
+const lifecycle = attachLifecycle({
+  api,
+  getState: () => state,
+  isBusy: () => busy,
+  isLocked: () => managementLocked || stopped,
+  setBusy: value => { busy = value; controls(); },
+  updateState: patch => {
+    state = { ...state, ...patch };
+    renderConnectionStatus();
+    renderShared();
+    controls();
+  },
+  note,
+  onShutdown: () => {
+    stopped = true;
+    refreshSequence++;
+    clearInterval(autoTimer);
+    autoTimer = null;
+    controls();
+  },
+});
+function renderLifecycle() { lifecycle.render(); }
+function renderConnectionStatus() {
+  const connected = !state?.paused && state?.bridge === 'connected';
+  text('device', state?.device?.name || '本机');
+  text('connection-status', state?.paused ? '已暂停' : connected ? '已连接' : '连接中');
+  $('connection-status').className = 'status-dot ' + (state?.paused ? 'paused' : connected ? 'online' : '');
 }
-$('login-startup').onchange = async () => {
-  if (busy || managementLocked || state?.startupAvailable !== true) { renderLifecycle(); return; }
-  const enabled = $('login-startup').checked; busy = true; $('login-startup').disabled = true; controls();
-  try {
-    const result = await api('management/startup', { enabled });
-    if (result.enabled !== enabled) throw Error('启动设置未确认。');
-    await refreshConnections(); note(enabled ? '已设置为登录后自动连接' : '已关闭登录自动连接', 'success');
-  } catch (error) { note(error.message, 'error'); }
-  finally { busy = false; renderLifecycle(); controls(); }
-};
-$('copy-update').onclick = async () => {
-  try { await navigator.clipboard.writeText($('update-command').value); note('更新命令已复制', 'success'); }
-  catch { $('update-command').focus(); $('update-command').select(); note('请复制选中的更新命令'); }
-};
 $('authorization-help').onclick = () => $('authorization-dialog').showModal();
 for (const id of ['close-authorization','authorization-done']) $(id).onclick = () => $('authorization-dialog').close();
 function folderList(target, folders) {
@@ -206,6 +210,7 @@ function renderShared() {
   text('detail-version', state?.version || '—');
 }
 async function refreshConnections(background = false) {
+  if (stopped) return;
   if (refreshWork) return refreshWork;
   refreshWork = refreshSnapshot(background).finally(() => { refreshWork = null; });
   return refreshWork;
@@ -214,9 +219,19 @@ async function refreshSnapshot(background) {
   const sequence = ++refreshSequence; refreshing = true;
   if (!state) controls();
   try {
-    const [nextState, value, terminalValue] = await Promise.all([status(), api('shares/connections'), api('terminal/permissions').then(value => ({ value }), error => ({ error }))]);
-    if (sequence !== refreshSequence || (background && isEditing())) return;
-    state = nextState; connections = value.connections;
+    // Local safety controls must remain usable when the cloud is unreachable.
+    const nextState = await status();
+    if (sequence !== refreshSequence || stopped || (background && isEditing())) return;
+    state = nextState;
+    renderConnectionStatus();
+    renderLifecycle();
+    controls();
+    const [value, terminalValue] = await Promise.all([
+      api('shares/connections'),
+      api('terminal/permissions').then(value => ({ value }), error => ({ error })),
+    ]);
+    if (sequence !== refreshSequence || stopped || (background && isEditing())) return;
+    connections = value.connections;
     terminalKnown = !terminalValue.error; terminals = terminalValue.value?.connections || [];
     const nextChoices = JSON.stringify(connections.map(c => [c.connectionId, c.clientName, c.callbackOrigin]));
     if (nextChoices !== choicesKey) {
@@ -225,11 +240,7 @@ async function refreshSnapshot(background) {
       if (connections.some(c => c.connectionId === old)) $('connection').value = old;
       choicesKey = nextChoices;
     }
-    text('device', state.device.name);
-    const connected = !state.paused && state.bridge === 'connected';
-    text('connection-status', state.paused ? '已暂停' : connected ? '已连接' : '连接中');
-    const stateClass = 'status-dot ' + (state.paused ? 'paused' : connected ? 'online' : '');
-    if ($('connection-status').className !== stateClass) $('connection-status').className = stateClass;
+    renderConnectionStatus();
     renderShared();
     lastSync = Date.now(); text('detail-sync', new Date(lastSync).toLocaleTimeString());
     text('sync-state', terminalValue.error ? '部分状态待同步' : '已同步');
@@ -434,22 +445,22 @@ $('confirm-remove').onclick = async () => {
   finally { busy = false; controls(); }
 };
 async function autoRefresh(force = false) {
-  if (managementLocked || busy || refreshing || folderDialog.open || terminalDialog.open || removeDialog.open || (!force && document.hidden)) return;
+  if (stopped || managementLocked || busy || refreshing || isEditing() || (!force && document.hidden)) return;
   try {
     await refreshConnections(true);
     const removals = await api('shares/removals').catch(() => null);
     if (removals?.pending.length) $('sync-state').textContent = '撤销待同步';
   } catch (error) {
-    if (error.status === 401) return;
+    if (stopped || error.status === 401) return;
     terminalKnown = false; renderShared(); controls();
     $('connection-status').textContent = '状态待同步'; $('connection-status').className = 'status-dot';
     $('sync-state').textContent = '暂未同步'; if (force) note(error.message, 'error');
   }
 }
-function startPolling() { if (!autoTimer) autoTimer = setInterval(() => { void autoRefresh(); }, 5000); }
+function startPolling() { if (!stopped && !autoTimer) autoTimer = setInterval(() => { void autoRefresh(); }, 5000); }
 let managementWork;
 async function restoreManagement() {
-  if (busy || managementWork) return managementWork;
+  if (stopped || busy || managementWork) return managementWork;
   managementWork = (async () => {
     $('retry-management').disabled = true;
     try { await establishManagement(); await refreshConnections(); startPolling(); note(); }
@@ -475,6 +486,7 @@ window.addEventListener('pageshow', () => { if (state && !managementLocked) { st
   try {
     await establishManagement();
     await refreshConnections();
+    if (stopped) return;
     startPolling();
     try { draft = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch { sessionStorage.removeItem(storageKey); }
     if (draft) {
@@ -483,8 +495,15 @@ window.addEventListener('pageshow', () => { if (state && !managementLocked) { st
       await openFolders();
     }
   } catch (error) {
-    if (error.status === 401) return;
-    note(error.message, 'error'); text('connection-status', '状态未读取');
-    if (!state) { text('device', '本机'); $('shared').replaceChildren(element('p', '暂时无法读取状态', 'empty')); }
+    if (stopped || error.status === 401) return;
+    note(error.message, 'error');
+    if (state) {
+      text('sync-state', '云端状态待同步');
+      $('shared').replaceChildren(element('p', '共享列表暂不可用，请重试；本机连接状态可在顶部查看。', 'empty'));
+      startPolling();
+    } else {
+      text('connection-status', '本机状态未读取'); text('device', '本机');
+      $('shared').replaceChildren(element('p', '暂时无法读取状态', 'empty'));
+    }
   }
 })();

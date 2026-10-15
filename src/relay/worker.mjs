@@ -13,7 +13,7 @@ import { checkedReferenceGrant } from '../shared/connection-access.mjs';
 import { accountRoute, accountAuthorize } from './account-http.mjs';
 import { oidcConfiguration } from './oidc-login.mjs';
 import { instanceRoute, instanceAuthorize } from './instance-http.mjs';
-import { publicBootstrap } from '../shared/public-bootstrap.mjs';
+import { installAssetRoute } from './install-assets.mjs';
 import { installRoute } from './install-http.mjs';
 import { requestBudget, REQUEST_BUDGET_VERSION } from './request-budget.mjs';
 export { Device, Registry };
@@ -69,14 +69,8 @@ const authHandler = {
         privateInstance: env.PRIVATE_INSTANCE === 'true',
         accountConnections: env.ACCOUNT_CONNECTIONS === 'true', accountLoginConfigured, accountEnrollment: env.ACCOUNT_ENROLLMENT === 'true' });
     }
-    if (url.pathname === '/install.sh' && !env.ASSETS && env.PUBLIC_BOOTSTRAP_URL && env.PRIVATE_INSTANCE === 'true' && ['GET','HEAD'].includes(request.method) && !url.search) {
-      const script = publicBootstrap(origin, env.PUBLIC_BOOTSTRAP_URL);
-      return new Response(request.method === 'HEAD' ? null : script, { headers: { 'Content-Type': 'application/x-sh; charset=utf-8', 'Cache-Control': 'no-store' } });
-    }
-    if (url.pathname === '/install.sh' || /^\/releases\/0\.1\.0-alpha\.[0-9]+\/(darwin-arm64|darwin-x64)\/[a-f0-9]{64}\.part[0-9]{2}$/.test(url.pathname)) {
-      if (env.PRIVATE_INSTANCE !== 'true' || !env.ASSETS || !['GET','HEAD'].includes(request.method) || url.search) return json({ error: 'Published installer is not available.' }, 404);
-      return env.ASSETS.fetch(new Request(origin + url.pathname, { method: request.method }));
-    }
+    const installerAsset = installAssetRoute(request, env, origin);
+    if (installerAsset) return installerAsset;
     if (url.pathname === '/install' || url.pathname === '/install.js' || url.pathname.startsWith('/install/')) return installRoute(request, env, origin);
     if (url.pathname.startsWith('/instance/')) return instanceRoute(request, env, origin);
     if (url.pathname.startsWith('/account/')) return accountRoute(request, env, origin);
