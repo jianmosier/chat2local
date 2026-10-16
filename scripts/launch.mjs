@@ -26,7 +26,7 @@ async function launch() {
   localNetworkOnly();
   const existing = await verifiedSession();
   if (existing && existing.appVersion !== VERSION) throw new Error('旧版 Chat2Local 仍在运行。请在旧面板点击“完全退出”，再双击新版；不会强行停止旧进程。');
-  if (existing) { if (showBrowser) await openBrowser(`${existing.origin}${process.argv.includes('--manage') || existing.hasShares ? '/folders' : '/'}#${existing.token}`); console.log('Opened the existing verified Chat2Local panel.'); return; }
+  if (existing) { if (showBrowser) await openBrowser(`${existing.origin}/folders#${existing.token}`); console.log('Opened the existing verified Chat2Local panel.'); return; }
   await fs.mkdir(store.directory, { recursive: true, mode: 0o700 });
   const logPath = path.join(store.directory, 'launcher.log');
   try { if ((await fs.stat(logPath)).size > 1024 * 1024) await fs.rename(logPath, `${logPath}.previous`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -41,7 +41,7 @@ async function launch() {
   while (Date.now() < deadline) {
     if (spawnError) throw spawnError;
     const ready = await verifiedSession();
-    if (ready) { if (showBrowser) await openBrowser(`${ready.origin}${process.argv.includes('--manage') || ready.hasShares ? '/folders' : '/'}#${ready.token}`); console.log('Chat2Local started. Closing the browser does not pause AI access; use Pause or Exit in the panel.'); return; }
+    if (ready) { if (showBrowser) await openBrowser(`${ready.origin}/folders#${ready.token}`); console.log('Chat2Local started. Closing the browser does not pause AI access; use Pause or Exit in the panel.'); return; }
     if (exited) break;
     await new Promise(resolve => setTimeout(resolve, 150));
   }

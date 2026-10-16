@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { Store, defaultStateDir } from '../src/agent/store.mjs';
 import { relayOrigin, VERSION } from '../src/shared/protocol.mjs';
+import { bootstrapSource } from '../src/shared/distribution.mjs';
 import { buildPortable } from './build-portable.mjs';
 import { releaseTarget, packageNameFor } from './release-targets.mjs';
 import { installPortable } from './install-portable.mjs';
@@ -17,7 +18,7 @@ const project = fileURLToPath(new URL('..', import.meta.url));
 const configuration = path.join(project, 'wrangler.local.jsonc');
 export function deploymentPlan({ accountId, subdomain, name, namespaceId }) {
   if (!/^[a-f0-9]{32}$/.test(accountId || '') || !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(subdomain || '') || !/^chat2local-[a-f0-9]{12}$/.test(name || '') || !/^[a-f0-9]{32}$/.test(namespaceId || '')) throw Error('Invalid generated private deployment.');
-  return { name, account_id: accountId, main: 'src/relay/worker.mjs', compatibility_date: '2026-09-18', compatibility_flags: ['global_fetch_strictly_public'], workers_dev: true, preview_urls: false, vars: { PUBLIC_ORIGIN: `https://${name}.${subdomain}.workers.dev`, PRIVATE_INSTANCE: 'true', MULTI_DEVICE: 'true', CUSTOM_CONNECTOR_ENABLED: 'true', DEVELOPER_HANDOFF: 'true', PUBLIC_BOOTSTRAP_URL: `https://raw.githubusercontent.com/jianmosier/chat2local/v${VERSION}/install.sh` }, kv_namespaces: [{ binding: 'OAUTH_KV', id: namespaceId }], durable_objects: { bindings: [{ name: 'DEVICES', class_name: 'Device' }, { name: 'REGISTRY', class_name: 'Registry' }] }, exports: { Device: { type: 'durable-object', storage: 'sqlite' }, Registry: { type: 'durable-object', storage: 'sqlite' } }, observability: { enabled: false } };
+  return { name, account_id: accountId, main: 'src/relay/worker.mjs', compatibility_date: '2026-09-18', compatibility_flags: ['global_fetch_strictly_public'], workers_dev: true, preview_urls: false, vars: { PUBLIC_ORIGIN: `https://${name}.${subdomain}.workers.dev`, PRIVATE_INSTANCE: 'true', MULTI_DEVICE: 'true', CUSTOM_CONNECTOR_ENABLED: 'true', DEVELOPER_HANDOFF: 'true', PUBLIC_BOOTSTRAP_URL: bootstrapSource('sh') }, kv_namespaces: [{ binding: 'OAUTH_KV', id: namespaceId }], durable_objects: { bindings: [{ name: 'DEVICES', class_name: 'Device' }, { name: 'REGISTRY', class_name: 'Registry' }] }, exports: { Device: { type: 'durable-object', storage: 'sqlite' }, Registry: { type: 'durable-object', storage: 'sqlite' } }, observability: { enabled: false } };
 }
 async function command(file, args, { input, visible = false, timeout = 300000, env = process.env } = {}) {
   return new Promise((resolve, reject) => {

@@ -5,21 +5,24 @@ import path from 'node:path';
 import http from 'node:http';
 import { chromium } from 'playwright-core';
 import { annotateCoverage } from '../src/shared/share-tree.mjs';
+import { uiAsset } from '../src/agent/ui-assets.mjs';
 
 const rootA = { rootId: 'a', label: 'Project Alpha', path: '/projects/alpha', mode: 'direct', locallyPresent: true, terminalAllowed: true };
 const rootB = { rootId: 'b', label: 'Reference', path: '/projects/reference', mode: 'read-only', locallyPresent: true, terminalAllowed: false };
 const rootC = { rootId: 'c', label: 'Tools', path: '/projects/tools', mode: 'direct', locallyPresent: true, terminalAllowed: false };
 async function fixture(t, options = {}) {
   const calls = [], errors = [];
-  let prepared, removal, consented = false, loginStartup = false;
+  let prepared, removal, consented = false, loginStartup = false, paused = false;
   const connections = [
     { connectionId: 'a'.repeat(32), clientName: 'ChatGPT', callbackOrigin: 'https://chatgpt.com', scopes: ['files:read','files:write'], roots: structuredClone([rootA, rootB, rootC]) },
     ...(options.twoConnections ? [{ connectionId: 'b'.repeat(32), clientName: 'Other client', callbackOrigin: 'https://client.example.test', scopes: ['files:read','files:write','terminal:execute'], roots: [{ ...rootC, rootId: 'other-c', label: 'Other tools', path: '/other/tools', terminalAllowed: false }] }] : []),
   ];
-  const assets = { '/folders': ['folders.html','text/html'], '/folders.js': ['folders.js','text/javascript'], '/folders.css': ['folders.css','text/css'] };
   const server = http.createServer((request, response) => {
-    const asset = assets[request.url]; if (!asset) { response.writeHead(404); response.end(); return; }
-    fs.readFile(path.join('src/agent/ui',asset[0])).then(bytes => { response.writeHead(200, { 'Content-Type': asset[1] }); response.end(bytes); });
+    const asset = uiAsset(request.url);
+    if (!asset) { response.writeHead(404); response.end(); return; }
+    fs.readFile(asset[0]).then(bytes => {
+      response.writeHead(200, { 'Content-Type': asset[1] }); response.end(bytes);
+    }).catch(() => { response.writeHead(500); response.end(); });
   });
   let browser;
   t.after(async () => {
@@ -43,11 +46,14 @@ async function fixture(t, options = {}) {
     calls.push({ action, input });
     const send = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     if (action === 'management/session') return send({ ready: true, expiresAt: Date.now() + 86400000 });
-    if (action === 'status') return send({ name: 'chat2local', device: { name: 'TEST-DESKTOP', system: 'Windows', platform: 'win32' }, bridge: 'connected', paused: false, startup: loginStartup, startupAvailable: true, version: 'fixture', setupOrigin: 'https://instance.example.test' });
+    if (action === 'status') return send({ name: 'chat2local', device: { name: 'TEST-DESKTOP', system: 'Windows', platform: 'win32' }, bridge: 'connected', paused, managementActions: options.lifecyclePreview ? { pause: true, shutdown: true } : undefined, startup: loginStartup, startupAvailable: true, version: 'fixture', setupOrigin: 'https://instance.example.test' });
     const snapshot = () => connections.map(c => ({ ...c, roots: annotateCoverage(c.roots.map(r => ({ ...r, terminalLocalEnabled: r.terminalAllowed, terminalAllowed: Boolean(r.terminalAllowed && c.scopes.includes('terminal:execute')) })), 'linux') }));
     if (options.slowSync && ['shares/connections','terminal/permissions'].includes(action)) await new Promise(resolve => setTimeout(resolve, 450));
     if (action === 'management/startup') { assert.equal(typeof input.enabled, 'boolean'); loginStartup = input.enabled; return send({ enabled: loginStartup }); }
-    if (action === 'shares/connections') return send({ connections: snapshot() });
+    if (action === 'pause') { assert.equal(typeof input.paused, 'boolean'); paused = input.paused; return send({ paused }); }
+    if (action === 'shutdown') { assert.deepEqual(input, {}); return send({ ok: true }); }
+    if (action === 'shares/connections') return options.cloudOffline
+      ? send({ error: 'Cloud is offline.' }, 503) : send({ connections: snapshot() });
     if (action === 'shares/removals') return send({ pending: [] });
     if (action === 'shares/remove-prepare') {
       const c = connections.find(c => c.connectionId === input.connectionId), r = c?.roots.find(r => r.rootId === input.rootId);
@@ -91,10 +97,67 @@ async function fixture(t, options = {}) {
     return send({ error: 'Unexpected route: ' + action }, 400);
   });
   await page.goto(origin + '/folders#' + 'a'.repeat(64));
-  await page.waitForFunction(() => document.querySelectorAll('.shared-row').length >= 3);
+  if (options.cloudOffline) await page.waitForFunction(() => !document.querySelector('#toggle-pause').disabled);
+  else await page.waitForFunction(() => document.querySelectorAll('.shared-row').length >= 3);
   await fs.mkdir('.artifacts/ui-review', { recursive: true });
   return { page, calls, errors, connections, origin };
 }
+test('management shows actions instead of raw commands and hides unsupported lifecycle controls', async t => {
+  const { page, calls } = await fixture(t);
+  assert.equal(await page.locator('#toggle-pause').isVisible(), false);
+  assert.equal(await page.locator('#open-shutdown').isVisible(), false);
+  await page.locator('#installation summary').click();
+  assert.equal(await page.locator('#copy-mcp').isVisible(), true);
+  assert.equal(await page.locator('#mcp-address').isVisible(), false);
+  assert.equal(await page.locator('#install-page').isVisible(), false);
+  await page.locator('#lifecycle > summary').click();
+  assert.equal(await page.locator('#copy-update').isVisible(), true);
+  assert.equal(await page.locator('#update-command').isVisible(), false);
+  assert.equal(await page.locator('#daily-entry').isVisible(), false);
+  assert.match(await page.locator('#update-hint').textContent(), /PowerShell/);
+  assert.equal(calls.some(call => ['pause', 'shutdown', 'management/startup'].includes(call.action)), false);
+});
+
+test('copy buttons keep the exact instance and do not run or open the copied command', async t => {
+  const { page, calls } = await fixture(t);
+  await page.evaluate(() => {
+    window.copiedValues = [];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async text => { window.copiedValues.push(text); },
+    } });
+  });
+  await page.locator('#installation > summary').click();
+  await page.locator('#copy-mcp').click();
+  await page.locator('#copy-install-page').click();
+  await page.locator('#lifecycle > summary').click();
+  await page.locator('#copy-update').click();
+  assert.deepEqual(await page.evaluate(() => window.copiedValues), [
+    'https://instance.example.test/mcp', 'https://instance.example.test/install',
+    'irm https://instance.example.test/install.ps1 | iex',
+  ]);
+  assert.equal(await page.locator('#manual-update').evaluate(node => node.open), false);
+  assert.equal(calls.some(call => /confirm|set-permission|execute|shutdown|pause/.test(call.action)), false);
+});
+
+test('blocked clipboard reveals a selectable value and command help stays readable on a narrow screen', async t => {
+  const { page, errors } = await fixture(t);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async () => { throw Error('Clipboard unavailable'); },
+    } });
+  });
+  await page.locator('#installation > summary').click();
+  await page.locator('#copy-mcp').click();
+  assert.equal(await page.locator('#mcp-address').isVisible(), true);
+  await page.locator('#lifecycle > summary').click();
+  await page.locator('#copy-update').click();
+  assert.equal(await page.locator('#manual-update').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#update-command').isVisible(), true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.deepEqual(errors, []);
+});
+
 test('unchanged background polls keep row/button identity, focus, opacity and expanded shares stable', async t => {
   const { page, calls, connections } = await fixture(t, { slowSync: true });
   connections[0].roots.push({ ...rootC, rootId: 'child', path: '/projects/tools/child', label: 'Child' });
@@ -123,11 +186,11 @@ test('lifecycle controls show partial capability honestly and login startup chan
   await page.locator('#authorization-help').click();
   await page.locator('#authorization-dialog').waitFor({ state: 'visible' });
   await page.locator('#authorization-done').click();
-  await page.locator('#lifecycle summary').click();
+  await page.locator('#lifecycle > summary').click();
   assert.equal(await page.locator('#login-startup').isChecked(), false);
   assert.equal(calls.filter(c => c.action === 'management/startup').length, 0);
   assert.equal(await page.locator('#daily-entry').inputValue(), '%LOCALAPPDATA%\\Chat2Local\\Chat2Local.cmd');
-  assert.match(await page.locator('#update-command').inputValue(), /-Instance 'https:\/\/instance\.example\.test'/);
+  assert.equal(await page.locator('#update-command').inputValue(), 'irm https://instance.example.test/install.ps1 | iex');
   await page.locator('#login-startup').check();
   await page.waitForFunction(() => !document.querySelector('#login-startup').disabled);
   assert.equal(await page.locator('#login-startup').isChecked(), true);
@@ -276,4 +339,63 @@ test('late folder results cannot change the selected path or grant a folder afte
   assert.equal(await page.locator('#add-current').isDisabled(), true);
   await page.locator('#cancel-add').click();
   assert.equal(calls.filter(c => /confirm|prepare|set-permission/.test(c.action)).length, 0);
+});
+
+test('UI preview: pause and resume preserve grants when explicitly advertised by a fixture backend', async t => {
+  const { page, calls, errors, connections } = await fixture(t, { lifecyclePreview: true });
+  const before = structuredClone(connections);
+  await page.locator('#toggle-pause').click();
+  await page.waitForFunction(() => document.querySelector('#toggle-pause').textContent === '恢复访问');
+  assert.equal(await page.locator('#open-add').isDisabled(), true);
+  assert.match(await page.locator('#message-text').innerText(), /正在运行的命令需另行取消/);
+  await page.locator('#toggle-pause').click();
+  await page.waitForFunction(() => document.querySelector('#toggle-pause').textContent === '暂停访问');
+  assert.deepEqual(calls.filter(c => c.action === 'pause').map(c => c.input), [{ paused: true }, { paused: false }]);
+  assert.deepEqual(connections, before);
+  assert.deepEqual(errors, []);
+});
+
+test('UI preview: exit requires confirmation, sends once and stops subsequent polling', async t => {
+  const { page, calls, errors } = await fixture(t, { lifecyclePreview: true });
+  await page.locator('#open-shutdown').click();
+  await page.locator('#cancel-shutdown').click();
+  assert.equal(calls.some(c => c.action === 'shutdown'), false);
+  await page.locator('#open-shutdown').click();
+  await page.locator('#confirm-shutdown').click();
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent === '已请求退出');
+  assert.equal(calls.filter(c => c.action === 'shutdown').length, 1);
+  const count = calls.length;
+  await page.waitForTimeout(5600);
+  assert.equal(calls.length, count);
+  assert.equal(await page.locator('#toggle-pause').isDisabled(), true);
+  assert.equal(await page.locator('#refresh').isDisabled(), true);
+  assert.deepEqual(errors, []);
+});
+
+test('UI preview: explicitly advertised local controls survive a cloud lookup failure', async t => {
+  const { page, calls, errors } = await fixture(t, { cloudOffline: true, lifecyclePreview: true });
+  await page.locator('#toggle-pause').click();
+  await page.waitForFunction(() => document.querySelector('#toggle-pause').textContent === '恢复访问');
+  await page.locator('#open-shutdown').click();
+  await page.locator('#confirm-shutdown').click();
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent === '已请求退出');
+  assert.equal(calls.filter(c => c.action === 'pause').length, 1);
+  assert.equal(calls.filter(c => c.action === 'shutdown').length, 1);
+  assert.deepEqual(errors, []);
+});
+
+test('one management hub exposes instance-scoped setup and fits desktop and mobile', async t => {
+  const { page, errors } = await fixture(t);
+  assert.equal(await page.locator('#toggle-pause').isDisabled(), true, 'Do not imply an unimplemented backend control is usable');
+  assert.equal(await page.locator('#open-shutdown').isDisabled(), true);
+  await page.locator('#installation summary').click();
+  assert.equal(await page.locator('#mcp-address').inputValue(), 'https://instance.example.test/mcp');
+  assert.equal(await page.locator('#install-page').inputValue(), 'https://instance.example.test/install');
+  await page.locator('#lifecycle > summary').click();
+  assert.equal(await page.locator('#update-command').inputValue(), 'irm https://instance.example.test/install.ps1 | iex');
+  await page.screenshot({ path: '.artifacts/ui-review/management-refactor-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: '.artifacts/ui-review/management-refactor-mobile.png', fullPage: true });
+  assert.deepEqual(errors, []);
 });
