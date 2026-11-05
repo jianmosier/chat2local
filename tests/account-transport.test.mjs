@@ -8,14 +8,15 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { startController } from '../src/agent/main.mjs';
 import { ACCESS_CAPABILITY } from '../src/shared/connection-access.mjs';
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 
 async function until(check) { const end = Date.now() + 8000; while (Date.now() < end) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 40)); } throw Error('Condition timed out.'); }
 async function json(response, status = 200) { assert.equal(response.status, status, await response.clone().text()); return response.json(); }
 
 test('real Durable Object/WebSocket/agent transports preserve connection scope and reject a reconnected legacy agent', { timeout: 40000 }, async t => {
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
   const enrollmentKey = randomBytes(32).toString('hex');
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey } }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey } }));
   t.after(() => mf.dispose()); const origin = (await mf.ready).origin;
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-scope-wire-')); const folder = path.join(base, 'sample'); await fs.mkdir(folder);
   const app = await startController({ port: 0, stateDir: path.join(base, 'private'), allowLocalRelay: true });

@@ -6,6 +6,13 @@ import { Store, openBrowser } from '../src/agent/store.mjs';
 import { DEFAULT_PORT } from '../src/agent/main.mjs';
 import { VERSION } from '../src/shared/protocol.mjs';
 import { childNetworkEnvironment, localNetworkOnly } from '../src/agent/network.mjs';
+import { configuredReadonlyBackend } from '../src/agent/files/rust-readonly.mjs';
+import { configuredWriterBackend } from '../src/agent/files/rust-writer.mjs';
+import { configuredOperationsCore } from '../src/agent/files/rust-operations.mjs';
+import { configuredTerminalRunner } from '../src/agent/terminal/rust-process-runner.mjs';
+import { configuredTerminalStore } from '../src/agent/terminal/rust-job-store.mjs';
+import { configuredLifecycle } from '../src/agent/runtime/rust-lifecycle.mjs';
+import { assertWriteFenceClear } from '../src/agent/files/write-fence.mjs';
 
 const entry = fileURLToPath(new URL('../src/agent/main.mjs', import.meta.url));
 const store = new Store();
@@ -19,6 +26,14 @@ async function verifiedSession() {
   } catch { return null; }
 }
 async function launch() {
+  // Validate the explicit local switch before touching the user's state.
+  configuredReadonlyBackend();
+  configuredWriterBackend();
+  configuredOperationsCore();
+  configuredTerminalRunner();
+  configuredTerminalStore();
+  configuredLifecycle();
+  await assertWriteFenceClear(store.directory);
   if (process.argv.slice(2).some(arg => !['--no-browser','--manage'].includes(arg))) throw new Error('Unknown launcher argument.');
   const showBrowser = !process.argv.includes('--no-browser') && process.env.CHAT2LOCAL_NO_BROWSER !== '1';
   const major = Number(process.versions.node.split('.')[0]);

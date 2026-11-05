@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OnboardingStore } from '../src/relay/onboarding-store.mjs';
+import { OnboardingStore } from './registry-fixture.mjs';
 import { randomSecret, sha256 } from '../src/shared/protocol.mjs';
 
 // Storage/session fixture ONLY. Signed OIDC and actual HTTP/PKCE are exercised

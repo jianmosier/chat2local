@@ -17,9 +17,10 @@ async function fixture(t, writable = true) {
   await fs.mkdir(rootPath); await fs.mkdir(state);
   const root = await approveRoot(rootPath, state, writable);
   const policy = { paused: false, roots: [root] };
-  const service = new FileService(() => policy, state);
+  let now = Date.now();
+  const service = new FileService(() => policy, state, undefined, { clock: () => now });
   await fs.writeFile(path.join(rootPath, 'note.txt'), 'original\n');
-  return { temporary, rootPath, state, root, policy, service, args: { rootId: root.id, path: 'note.txt' } };
+  return { temporary, rootPath, state, root, policy, service, advance: delta => { now += delta; }, args: { rootId: root.id, path: 'note.txt' } };
 }
 
 test('paths: traversal, Windows aliases, streams, reserved and sensitive names are rejected', () => {
@@ -125,7 +126,7 @@ test('binary, oversized and invalid UTF-8 files are rejected', async t => {
 test('expired proposals and restarted-agent unknown states cannot be mistaken for success', async t => {
   const f = await fixture(t); const read = await f.service.invoke('read_file', f.args);
   const proposal = await f.service.invoke('propose_write', { ...f.args, expectedHash: read.sha256, content: 'no' });
-  f.service.operations.get(proposal.operationId).createdAt -= 11 * 60_000;
+  f.advance(11 * 60_000);
   assert.equal(f.service.status(proposal.operationId).status, 'expired');
   await assert.rejects(f.service.decide(proposal.operationId, true));
   const fresh = new FileService(() => f.policy, f.state);
@@ -166,13 +167,17 @@ test('relay URL validation requires HTTPS except explicit loopback development',
 });
 
 test('bridge refuses to replay a duplicate request ID', async () => {
+  const { fakeBridgeOptions, bridgeIdentity, until } = await import('./lifecycle-fixtures.mjs');
   let calls = 0; const responses = [];
-  const bridge = new Bridge(async () => { calls++; return { status: 'pending' }; });
-  const socket = { readyState: 1, send: data => responses.push(JSON.parse(data)) };
+  const bridge = new Bridge(async () => { calls++; return { status: 'pending' }; }, fakeBridgeOptions());
+  bridge.start(bridgeIdentity); await until(() => bridge.state === 'connected');
+  const socket = bridge.socket; socket.send = data => responses.push(JSON.parse(data));
+  const { generation, attempt } = bridge.lifecycle.snapshot().bridge;
   const message = JSON.stringify({ kind: 'call', id: randomUUID(), tool: 'propose_write', args: {} });
-  await bridge.receive(message, socket); await bridge.receive(message, socket);
+  await bridge.receive(message, socket, { generation, attempt }); await bridge.receive(message, socket, { generation, attempt });
   assert.equal(calls, 1); assert.match(responses[1].error, /Duplicate/);
   await assert.rejects(bridge.receive(JSON.stringify({ kind: 'bad', id: 'bad' }), socket));
+  bridge.stop();
 });
 
 test('credentials persist with Windows DPAPI (or POSIX-only development permissions)', async t => {

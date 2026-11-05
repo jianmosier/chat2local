@@ -6,6 +6,7 @@ import os from 'node:os';
 import { FolderPicker } from '../src/agent/folder-picker.mjs';
 import { startController } from '../src/agent/main.mjs';
 import { chromium } from 'playwright-core';
+import { fakeBridgeOptions, bridgeIdentity, until } from './lifecycle-fixtures.mjs';
 
 async function fixture(t) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-picker-'));
@@ -14,7 +15,7 @@ async function fixture(t) {
   let finish; let started;
   const entered = new Promise(resolve => { started = resolve; });
   let signals = [];
-  const app = await startController({ port: 0, stateDir: path.join(base, 'private'),
+  const app = await startController({ port: 0, stateDir: path.join(base, 'private'), bridgeOptions: fakeBridgeOptions(),
     pickFolder: ({ signal }) => { signals.push(signal); started(); return new Promise(resolve => { finish = resolve; }); }
   });
   const local = (route, body, extra = {}, timeoutMs = 6000) => fetch(`${app.origin}/api/${route}`, {
@@ -79,7 +80,7 @@ test('actual browser: picker waits independently; one permission change saves im
   const f = await fixture(t); const browser = await chromium.launch({ channel: 'msedge', headless: true });
   t.after(() => browser.close());
   // This invokes the bridge's local callback, not a real ChatGPT request; UI fixture only.
-  await f.app.bridge.invoke('list_roots', {}); f.app.bridge.state = 'connected';
+  await f.app.bridge.invoke('list_roots', {}); f.app.bridge.start(bridgeIdentity); await until(() => f.app.bridge.state === 'connected');
   // This request intentionally remains open while the browser exercises the UI.
   // The ordinary 6s API deadline must not cancel it before the explicit click;
   // the overall test remains bounded by 45s and cancellation is still asserted.

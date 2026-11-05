@@ -2,23 +2,28 @@ export const finished = state => ['succeeded', 'failed', 'cancelled', 'timed-out
 
 /** Stable terminal journal keys and public result shape, independent of processes. */
 export class TerminalJobStore {
-  constructor(store) {
+  constructor(store, records) {
     this.store = store;
+    this.records = records;
     this.jobs = new Map();
   }
 
   async read(requestId) {
-    return this.jobs.get(requestId)?.record || await this.store.readPrivateRecord('terminal-' + requestId);
+    return this.jobs.get(requestId)?.record || await (this.records ? this.records.read(requestId) : this.store.readPrivateRecord('terminal-' + requestId));
   }
 
-  reserve(record) {
-    return this.store.savePrivateRecord('terminal-' + record.requestId, record);
+  async reserve(record) {
+    if (this.records) return this.records.reserve(record);
+    await this.store.savePrivateRecord('terminal-' + record.requestId, record);
+    return { kind: 'created', record };
   }
+
+  assertAvailable() { this.records?.assertAvailable(); }
 
   save(job) {
     const snapshot = structuredClone(job.record);
     job.persist = job.persist.catch(() => {}).then(() =>
-      this.store.savePrivateRecord('terminal-' + snapshot.requestId, snapshot));
+      this.records ? this.records.save(snapshot) : this.store.savePrivateRecord('terminal-' + snapshot.requestId, snapshot));
     return job.persist;
   }
 

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { AccountIdentity, accountPrincipal } from '../src/relay/account-identity.mjs';
-import { AccountDirectory } from '../src/relay/account-directory.mjs';
+import { AccountDirectory } from './registry-fixture.mjs';
 import { checkedReferenceGrant, ACCESS_CAPABILITY } from '../src/shared/connection-access.mjs';
 import { routeDeviceTool } from '../src/relay/device-router.mjs';
 import { FileService, approveRoot } from '../src/agent/files.mjs';

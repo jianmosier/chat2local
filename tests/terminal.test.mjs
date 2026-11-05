@@ -4,6 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { TerminalProcessRunner } from '../src/agent/terminal/process-runner.mjs';
+import { TerminalJobStore } from '../src/agent/terminal/job-store.mjs';
 import { TerminalService, terminalEnvironment, terminalCwd, terminalShell } from '../src/agent/terminal.mjs';
 import { Store } from '../src/agent/store.mjs';
 import { approveRoot } from '../src/agent/files.mjs';
@@ -61,4 +64,47 @@ test('terminal output is bounded; cwd cannot traverse roots; interrupted journal
   await f.terminal.invoke('terminal_execute', a, f.access); const done = await f.wait(a); assert.equal(done.truncated, true); assert.ok(Buffer.byteLength(done.stdout + done.stderr) <= 65540);
   const pendingId = randomUUID(); await f.store.savePrivateRecord('terminal-' + pendingId, { requestId:pendingId, rootId:f.root.id, connectionId:f.access.connectionId, resource:f.access.resource, deviceId:f.access.deviceId, status:'running' });
   const unknown = await f.terminal.invoke('terminal_status', { rootId:f.root.id, requestId:pendingId }, f.access); assert.equal(unknown.status,'interrupted'); assert.equal(unknown.outcomeKnown,false);
+});
+
+test('default JS keeps supervising a spawned process after running journal failure and close waits for cleanup', async t => {
+  const f = await fixture(t), save = f.store.savePrivateRecord.bind(f.store);
+  f.store.savePrivateRecord = async (key, record) => { if (record.status === 'running') throw Error('fixture running save failure'); return save(key, record); };
+  const a = f.args(process.platform === 'win32' ? 'Start-Sleep -Seconds 30' : 'sleep 30');
+  const started = await f.terminal.invoke('terminal_execute', a, f.access);
+  const job = f.terminal.jobs.get(a.requestId); assert.ok(job.child.pid);
+  assert.ok(['running', 'stopping'].includes(started.status)); assert.equal(started.outcomeKnown, false); assert.equal(f.terminal.activeCount(), 1);
+  while (!job.requestedStop) await new Promise(resolve => setTimeout(resolve, 5));
+  await f.terminal.close();
+  assert.equal(job.record.status, 'failed'); assert.equal(job.record.outcomeKnown, true);
+  assert.notEqual(job.child.exitCode ?? job.child.signalCode, null); assert.equal(f.terminal.activeCount(), 0);
+});
+
+test('default JS waits for termination result after shell close and retains unknown active state', async () => {
+  for (const confirmed of [true, false]) {
+    let resolveTermination;
+    const child = new EventEmitter(); Object.assign(child, { pid: 1234, exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const journal = new TerminalJobStore({ savePrivateRecord: async () => {} });
+    const runner = new TerminalProcessRunner({ journal, authorize() {}, spawnProcess: () => child,
+      terminate: () => new Promise(resolve => { resolveTermination = resolve; }) });
+    const record = { requestId: randomUUID(), status: 'starting', stdout: '', stderr: '', outcomeKnown: false };
+    await runner.start({ record, access: {}, shell: { file: 'fixture', args: [] }, cwd: '.', timeoutMs: 10000 });
+    const job = journal.jobs.get(record.requestId); await runner.stop(job, 'failed');
+    child.exitCode = 1; child.emit('close', 1, null); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(record.status, 'stopping'); assert.equal(record.outcomeKnown, false);
+    resolveTermination(confirmed); await job.done;
+    assert.equal(record.status, confirmed ? 'failed' : 'stopping'); assert.equal(record.outcomeKnown, confirmed);
+    assert.equal(record.terminationConfirmed, confirmed); await runner.close();
+  }
+});
+
+test('default JS STARTED and close remain available when post-spawn persistence never settles', async () => {
+  const child = new EventEmitter(); Object.assign(child, { pid: 1234, exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter() });
+  const journal = new TerminalJobStore({ savePrivateRecord: () => new Promise(() => {}) });
+  const runner = new TerminalProcessRunner({ journal, authorize() {}, spawnProcess: () => child, terminate: async () => true });
+  const record = { requestId: randomUUID(), status: 'starting', stdout: '', stderr: '', outcomeKnown: false };
+  const started = await runner.start({ record, access: {}, shell: { file: 'fixture', args: [] }, cwd: '.', timeoutMs: 10000 });
+  assert.equal(started.status, 'running'); const job = journal.jobs.get(record.requestId);
+  await runner.stop(job, 'cancelled'); child.exitCode = 1; child.emit('close', 1, null);
+  await runner.close(); assert.equal(record.status, 'cancelled'); assert.equal(record.outcomeKnown, true);
+  assert.match(record.message, /save is pending/);
 });

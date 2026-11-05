@@ -1,0 +1,20 @@
+[package]
+name = "chat2local-native-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-js-value-compat = { path = "../js-value-compat" }
+chat2local-agent-platform.workspace = true
+chat2local-policy.workspace = true
+chat2local-protocol.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[dev-dependencies]
+serde_json.workspace = true

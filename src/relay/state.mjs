@@ -2,7 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { json, readLimited, randomSecret, sha256, checkArguments, MAX_WIRE_BYTES } from '../shared/protocol.mjs';
 import { deviceDescription } from '../shared/device-grants.mjs';
 import { rosterStorageRoute } from './device-roster.mjs';
-import { startLease, readLease, socketIsLive, touchLease, retireSocket, failSocketPending } from './socket-lease.mjs';
+import { startLease, readLease, socketIsLive, touchLease, retireSocket } from './socket-lease.mjs';
+import { JsDeviceSessionCore, requestId, epoch, validResult } from './device-session-core.mjs';
 import { ACCESS_CAPABILITY, checkedAccess } from '../shared/connection-access.mjs';
 import { TERMINAL_CAPABILITY } from '../shared/protocol.mjs';
 import { AccountDirectory } from './account-directory.mjs';
@@ -10,6 +11,7 @@ import { OnboardingStore } from './onboarding-store.mjs';
 import { PrivateInstance } from './private-instance.mjs';
 import { InstallPortal } from './install-portal.mjs';
 import { consumeBudget } from './request-budget.mjs';
+import { registryResponse } from './registry-transaction.mjs';
 
 export const validDevice = id => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
 export const validSecret = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -17,11 +19,58 @@ export async function equalSecret(value, digest) { return validSecret(value) && 
 
 /** One durable object per computer. No file content is persisted in relay storage. */
 export class Device extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.pending = new Map(); }
+  constructor(ctx, env, coreFactory = () => new JsDeviceSessionCore()) {
+    super(ctx, env);
+    // Only platform resources live here; membership/admission belongs to core.
+    this.pending = new Map(); this.socketTokens = new WeakMap(); this.nextSocket = 0;
+    this.poisoned = false;
+    try { this.core = coreFactory(); } catch { this.poisoned = true; }
+    this.leaseCore = { execute: command => this.decision(command) };
+  }
+  decision(command) {
+    try {
+      if (this.poisoned) throw Error('Device session unavailable.');
+      const result = this.core.execute(command);
+      if (!validResult(command, result)) throw Error('Invalid session decision.');
+      return result;
+    } catch (error) { this.poison(); throw error; }
+  }
+  poison() {
+    this.poisoned = true; try { this.core?.freeze?.(); } catch {}
+    for (const operation of this.pending.values()) { clearTimeout(operation.timer); operation.resolve(this.disconnected()); }
+    this.pending.clear();
+  }
+  disconnected() { return json({ error: 'Computer disconnected. Outcome unknown; no request was replayed.' }, 503); }
+  retire(socket, reason) {
+    try { retireSocket(socket, reason, this.poisoned ? undefined : this.leaseCore); }
+    catch { this.poison(); retireSocket(socket, reason); }
+  }
+  socketToken(socket) {
+    let token = this.socketTokens.get(socket);
+    if (!token) {
+      if (!Number.isSafeInteger(++this.nextSocket)) { this.poison(); throw Error('Socket token exhausted.'); }
+      token = String(this.nextSocket); this.socketTokens.set(socket, token);
+    }
+    return token;
+  }
+  newRequestId() { return crypto.randomUUID(); }
+  consume(command, response) {
+    try {
+      const ids = this.decision(command).consumed;
+      const expected = [...this.pending].filter(([id, value]) => command.op === 'disconnect'
+        ? command.socket === null || value.token === command.socket : id === command.id && value.token === command.socket).map(([id]) => id);
+      if (ids.length !== expected.length || ids.some(id => !expected.includes(id))) throw Error('Session resource mismatch.');
+      for (const id of ids) {
+        const operation = this.pending.get(id), result = response(); this.pending.delete(id); clearTimeout(operation.timer); operation.resolve(result);
+      }
+    } catch { this.poison(); }
+  }
   sockets() {
+    if (this.poisoned) return [];
     return this.ctx.getWebSockets('device').filter(socket => {
-      if (socketIsLive(socket)) return true;
-      retireSocket(socket);
+      try { if (socketIsLive(socket, Date.now(), this.leaseCore)) return true; }
+      catch { this.poison(); }
+      this.retire(socket);
       this.failPending(socket);
       return false;
     });
@@ -75,6 +124,7 @@ export class Device extends DurableObject {
       return json({ online: Boolean(active), description: deviceDescription(record.description), capabilities: active && readLease(active)?.connectionAccess === true ? [ACCESS_CAPABILITY, ...(readLease(active)?.terminal === true ? [TERMINAL_CAPABILITY] : [])] : [] });
     }
     if (route === '/connect') {
+      if (this.poisoned) return this.disconnected();
       const protocols = (request.headers.get('Sec-WebSocket-Protocol') || '').split(',').map(item => item.trim());
       const key = protocols.find(item => item.startsWith('device.'))?.slice(7);
       if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !protocols.includes('chat2local-v1') || !await equalSecret(key, record.keyHash)) return json({ error: 'Invalid device authentication.' }, 401);
@@ -85,8 +135,10 @@ export class Device extends DurableObject {
       if (this.sockets().length) return json({ error: 'Device is already connected.' }, 409);
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1], ['device']);
-      const lease = startLease(pair[1]);
-      pair[1].serializeAttachment({ ...lease, connectionAccess: protocols.includes(ACCESS_CAPABILITY), terminal: protocols.includes(TERMINAL_CAPABILITY) });
+      try {
+        const lease = startLease(pair[1], Date.now(), this.leaseCore);
+        pair[1].serializeAttachment({ ...lease, connectionAccess: protocols.includes(ACCESS_CAPABILITY), terminal: protocols.includes(TERMINAL_CAPABILITY) });
+      } catch { this.retire(pair[1]); this.poison(); return this.disconnected(); }
       return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sec-WebSocket-Protocol': 'chat2local-v1' } });
     }
     if (route === '/browser-handoff') {
@@ -125,7 +177,7 @@ export class Device extends DurableObject {
       if (route === '/revoke') {
         await this.ctx.storage.put('identity', { ...record, revoked: true, epoch: randomSecret() });
         await this.ctx.storage.delete(['pair', 'browser-handoff', 'browser-session']);
-        for (const socket of this.ctx.getWebSockets('device')) retireSocket(socket, 'Device revoked');
+        for (const socket of this.ctx.getWebSockets('device')) this.retire(socket, 'Device revoked');
         this.failPending(); return json({ ok: true });
       }
       if (!this.sockets().length) return json({ error: 'Computer is offline.' }, 409);
@@ -143,91 +195,106 @@ export class Device extends DurableObject {
       return accepted ? json({ epoch: record.epoch }) : json({ error: 'Pairing code invalid, expired, or already used.' }, 403);
     }
     if (route === '/invoke') {
+      if (this.poisoned) return this.disconnected();
       const value = JSON.parse(await readLimited(request));
       if (value.epoch !== record.epoch) return json({ error: 'Device grant revoked.' }, 403);
       try { checkArguments(value.tool, value.args); } catch { return json({ error: 'Invalid tool request.' }, 400); }
       // Parsing the request may yield. Recheck the epoch immediately before
       // dispatch; there is no intervening async I/O before the socket send.
       const current = await this.ctx.storage.get('identity');
-      if (!current || current.revoked || value.epoch !== current.epoch) return json({ error: 'Device grant revoked.' }, 403);
       const socket = this.sockets()[0];
-      if (!socket) return json({ error: 'Computer is offline. No operation was queued or replayed.' }, 503);
       if (value.connectionAccess !== undefined) {
         try { checkedAccess(value.connectionAccess); } catch { return json({ error: 'Invalid connection access envelope.' }, 400); }
-        if (readLease(socket)?.connectionAccess !== true) return json({ error: 'Current agent cannot enforce connection-scoped access.' }, 409);
       }
-      if (this.pending.size >= 12) return json({ error: 'Computer is busy. Retry only after checking operation status.' }, 429);
-      const id = crypto.randomUUID();
+      const id = this.newRequestId();
+      let admission, token;
+      try {
+        token = socket ? this.socketToken(socket) : '1';
+        admission = this.decision({ op: 'admit', id, socket: token, epoch: epoch(value.epoch),
+          identity: { present: Boolean(current), revoked: Boolean(current?.revoked), epoch: epoch(current?.epoch) },
+          capability: { required: value.connectionAccess !== undefined, supported: Boolean(socket && readLease(socket)?.connectionAccess === true) }, live: Boolean(socket) });
+      } catch { return this.disconnected(); }
+      if (!admission.admitted) {
+        if (admission.reason === 'revoked') return json({ error: 'Device grant revoked.' }, 403);
+        if (admission.reason === 'capability') return json({ error: 'Current agent cannot enforce connection-scoped access.' }, 409);
+        if (admission.reason === 'busy') return json({ error: 'Computer is busy. Retry only after checking operation status.' }, 429);
+        if (admission.reason === 'duplicate') { this.poison(); return this.disconnected(); }
+        return json({ error: 'Computer is offline. No operation was queued or replayed.' }, 503);
+      }
       return new Promise(resolve => {
-        const timer = setTimeout(() => {
-          this.pending.delete(id);
-          resolve(json({ error: 'Response timed out. Outcome unknown; do not replay a write proposal blindly.' }, 504));
-        }, 20_000);
-        this.pending.set(id, { resolve, timer, socket });
-        try { socket.send(JSON.stringify({ kind: 'call', id, tool: value.tool, args: value.args, ...(value.connectionDiagnostics ? { connectionDiagnostics: value.connectionDiagnostics } : {}), ...(value.connectionAccess !== undefined ? { connectionAccess: value.connectionAccess } : {}) })); }
-        catch { clearTimeout(timer); this.pending.delete(id); resolve(json({ error: 'Connection lost. Outcome unknown; request was not replayed.' }, 503)); }
+        let timer;
+        try {
+          timer = setTimeout(() => this.consume({ op: 'timeout', id, socket: token }, () => json({ error: 'Response timed out. Outcome unknown; do not replay a write proposal blindly.' }, 504)), 20_000);
+          this.pending.set(id, { resolve, timer, socket, token });
+          socket.send(JSON.stringify({ kind: 'call', id, tool: value.tool, args: value.args, ...(value.connectionDiagnostics ? { connectionDiagnostics: value.connectionDiagnostics } : {}), ...(value.connectionAccess !== undefined ? { connectionAccess: value.connectionAccess } : {}) }));
+        } catch {
+          clearTimeout(timer);
+          try { const ids = this.decision({ op: 'timeout', id, socket: token }).consumed; if (ids.length !== 1 || ids[0] !== id) throw Error(); this.pending.delete(id); }
+          catch { this.poison(); }
+          resolve(json({ error: 'Connection lost. Outcome unknown; request was not replayed.' }, 503));
+        }
       });
     }
     return json({ error: 'Unknown internal route.' }, 404);
   }
   webSocketMessage(socket, message) {
-    if (!socketIsLive(socket)) { retireSocket(socket); this.failPending(socket); return; }
-    if (message === 'ping') { touchLease(socket); socket.send('pong'); return; }
     try {
+      if (this.poisoned || !socketIsLive(socket, Date.now(), this.leaseCore)) { this.retire(socket); this.failPending(socket); return; }
+      if (message === 'ping') { touchLease(socket, Date.now(), this.leaseCore); socket.send('pong'); return; }
       if (typeof message !== 'string' || new TextEncoder().encode(message).length > MAX_WIRE_BYTES) throw new Error('Frame too large.');
       const value = JSON.parse(message);
       if (value.kind !== 'result' || typeof value.id !== 'string') throw new Error('Invalid frame.');
-      touchLease(socket);
-      const pending = this.pending.get(value.id);
-      if (!pending || pending.socket !== socket) return;
-      this.pending.delete(value.id); clearTimeout(pending.timer);
-      pending.resolve(typeof value.error === 'string' ? json({ error: value.error }, 422) : json({ result: value.result }));
-    } catch { retireSocket(socket, 'Invalid device response'); this.failPending(socket); }
+      touchLease(socket, Date.now(), this.leaseCore);
+      this.consume({ op: 'settle', id: requestId(value.id) ? value.id : null, socket: this.socketToken(socket) },
+        () => typeof value.error === 'string' ? json({ error: value.error }, 422) : json({ result: value.result }));
+    } catch { this.retire(socket, 'Invalid device response'); this.failPending(socket); }
   }
   failPending(socket) {
-    failSocketPending(this.pending, socket, () => json({ error: 'Computer disconnected. Outcome unknown; no request was replayed.' }, 503));
+    if (this.poisoned) { this.poison(); return; }
+    this.consume({ op: 'disconnect', socket: socket ? this.socketToken(socket) : null }, () => this.disconnected());
   }
   webSocketClose(socket, code) { try { socket.close(code === 1005 ? 1000 : code); } catch {} this.failPending(socket); }
-  webSocketError(socket) { retireSocket(socket, 'Device connection error'); this.failPending(socket); }
+  webSocketError(socket) { this.retire(socket, 'Device connection error'); this.failPending(socket); }
 }
 
 /** Bounded operator enrollment, short-lived consent tickets, and global abuse budgets. */
 export class Registry extends DurableObject {
+  constructor(ctx, env, runnerFactory = null) { super(ctx, env); this.registryRunner = runnerFactory?.() ?? null; }
   async fetch(request) {
     const route = new URL(request.url).pathname;
     const value = JSON.parse(await readLimited(request, 16 * 1024));
-    if (route.startsWith('/roster/') || route.startsWith('/link-ticket/')) return rosterStorageRoute(this.ctx.storage, route, value);
+    if (route.startsWith('/roster/') || route.startsWith('/link-ticket/')) return rosterStorageRoute(this.ctx.storage, route, value, this.registryRunner);
     if (route.startsWith('/onboarding/')) {
       if (this.env.ACCOUNT_CONNECTIONS !== 'true') return json({ error: 'Account onboarding disabled.' }, 403);
       const action = route.slice('/onboarding/'.length);
       if (!['records','connections','reuse','start','provision','native','finish'].includes(action)) return json({ error: 'Unknown onboarding command.' }, 404);
-      try { return json(await new OnboardingStore(this.ctx.storage)[action](value)); }
+      try { return json(await new OnboardingStore(this.ctx.storage, Date.now, this.registryRunner)[action](value)); }
       catch (error) { return json({ error: error.status ? error.message : 'Account request rejected.' }, error.status || 400); }
     }
     if (route.startsWith('/install/')) {
       if (this.env.PRIVATE_INSTANCE !== 'true' || this.env.ACCOUNT_CONNECTIONS === 'true') return json({ error: 'Private installation is disabled.' }, 403);
       const action = route.slice('/install/'.length);
       if (!['configured','configure','login','logout','start','context','authorize','claim','ready'].includes(action)) return json({ error: 'Unknown installer action.' }, 404);
-      try { return json(await new InstallPortal(this.ctx.storage, value.resource, this.env.ENROLLMENT_KEY)[action](value.input)); }
+      try { return json(await new InstallPortal(this.ctx.storage, value.resource, this.env.ENROLLMENT_KEY, Date.now, this.registryRunner)[action](value.input)); }
       catch (error) { return json({ error: error.status ? error.message : 'Installer request rejected.' }, error.status || 400); }
     }
     if (route.startsWith('/instance/')) {
       if (this.env.PRIVATE_INSTANCE !== 'true' || this.env.ACCOUNT_CONNECTIONS === 'true') return json({ error: 'Private instance mode is disabled or ambiguous.' }, 403);
       const action = route.slice('/instance/'.length);
       if (!['connections','createInvitation','revokeInvitation','makeFlow','claim','native','finish','remembered','manage'].includes(action)) return json({ error: 'Unknown private-instance command.' }, 404);
-      try { return json(await new PrivateInstance(this.ctx.storage, value.resource)[action](value.input)); }
+      try { return json(await new PrivateInstance(this.ctx.storage, value.resource, Date.now, this.registryRunner)[action](value.input)); }
       catch (error) { return json({ error: error.status ? error.message : 'Private-instance request rejected.' }, error.status || 400); }
     }
     if (route === '/accounts/resolve') {
       if (this.env.ACCOUNT_CONNECTIONS !== 'true' && this.env.PRIVATE_INSTANCE !== 'true') return json({ error: 'Scoped connections are not enabled.' }, 403);
-      return json(await new AccountDirectory(this.ctx.storage).execute({ action: 'resolve', grant: value }));
+      return json(await new AccountDirectory(this.ctx.storage, { runner: this.registryRunner }).execute({ action: 'resolve', grant: value }));
     }
-    if (route === '/budget') return consumeBudget(this.ctx.storage, value);
+    if (route === '/budget') return consumeBudget(this.ctx.storage, value, Date.now(), this.registryRunner);
     if (route === '/self-enroll') {
       if (!validDevice(value.deviceId) || !validSecret(value.keyHash) || !validSecret(value.ipHash)) return json({ error: 'Invalid registration.' }, 400);
       const limit = Number(this.env.SELF_SERVICE_DEVICE_LIMIT ?? 10);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) return json({ error: 'Registration is unavailable.' }, 503);
-      return this.ctx.storage.transaction(async storage => {
+      return registryResponse(this.ctx.storage, this.registryRunner, 'registry.selfEnroll', { value, limit }, async storage => {
         const previous = await storage.get(`device:${value.deviceId}`);
         if (previous) return previous.kind === 'self' && previous.keyHash === value.keyHash ? json({ ok: true }) : json({ error: 'Identity already exists.' }, 409);
         const count = await storage.get('deviceCount') ?? 0;
@@ -245,7 +312,7 @@ export class Registry extends DurableObject {
     }
     if (route === '/enroll') {
       if (!validDevice(value.deviceId)) return json({ error: 'Invalid device ID.' }, 400);
-      return this.ctx.storage.transaction(async storage => {
+      return registryResponse(this.ctx.storage, this.registryRunner, 'registry.enroll', { value }, async storage => {
         const count = await storage.get('deviceCount') ?? 0;
         if (count >= 100 || await storage.get(`device:${value.deviceId}`)) return json({ error: 'Device quota exceeded or identity already enrolled.' }, 409);
         await storage.put({ deviceCount: count + 1, [`device:${value.deviceId}`]: true }); return json({ ok: true });
@@ -263,7 +330,7 @@ export class Registry extends DurableObject {
     if (route === '/ticket/peek' || route === '/ticket/consume') {
       if (!validSecret(value.ticket) || !validSecret(value.csrf)) return json({ error: 'Invalid consent proof.' }, 403);
       const key = `ticket:${await sha256(value.ticket)}`;
-      return this.ctx.storage.transaction(async storage => {
+      return registryResponse(this.ctx.storage, this.registryRunner, 'registry.ticket.inspect', { key, csrf: value.csrf, consume: route.endsWith('/consume') }, async storage => {
         const ticket = await storage.get(key);
         if (!ticket || ticket.expiresAt <= Date.now() || !await equalSecret(value.csrf, ticket.csrfHash)) return json({ error: 'Consent expired or invalid.' }, 403);
         if (route.endsWith('/consume')) await storage.delete(key);

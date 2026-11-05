@@ -17,14 +17,14 @@ test('public documentation links and versions match the exported contract', asyn
   for (const relative of files) {
     const text = await fs.readFile(path.join(root, relative), 'utf8');
     assert.ok(text.includes(VERSION), relative + ' lacks the current version');
-    for (const heading of ['## 1. 项目概览', '## 2. 技术架构', '## 3. 安装与使用', '## 4. 功能', '## 5. 管理页']) assert.ok(text.includes(heading), heading);
-    assert.equal((text.match(/^## /gm) || []).length, 5);
-    assert.equal((text.match(/^```mermaid$/gm) || []).length, 2);
-    assert.equal(/蓝牙|Bluetooth|首次配对|jianmosier|DevSpace|候选版|验收|本次源码|尚未接通/i.test(text), false);
+    for (const heading of ['## 1. 首次配对', '## 2. 回连', '## 3. 多设备连接', '## 4. 管理']) assert.ok(text.includes(heading), heading);
+    assert.equal((text.match(/^## /gm) || []).length, 4);
+    assert.equal((text.match(/^```mermaid$/gm) || []).length, 1);
+    assert.equal(/蓝牙|Bluetooth|DevSpace|尚未接通/i.test(text), false);
     assert.ok(text.length < 4800, 'README should remain an overview, not an operations journal');
     assert.equal(/<\/details>\s*<details>/.test(text), false, 'Separate HTML blocks with normal Markdown content');
-    for (const entry of ['files.mjs', 'terminal.mjs', 'tool-dispatcher.mjs', 'agent-state.mjs']) assert.ok(text.includes(entry));
-    assert.ok(text.includes('child_process.spawn'));
+    for (const entry of ['crates/', 'src/agent/', 'src/relay/', 'build-native-agent.mjs']) assert.ok(text.includes(entry));
+    assert.ok(text.includes('Rust'));
     assert.ok(text.includes('终端不是操作系统沙箱')); 
     for (const link of text.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
       const target = link[1].split('#')[0];
@@ -58,7 +58,7 @@ test('public export includes current docs and passes its independent read-only t
   const report = await buildPublic(path.join(base, 'export'));
   const manifest = JSON.parse(await fs.readFile(path.join(report.directory, 'SOURCE-SHA256.json')));
   for (const doc of publicDocuments) assert.ok(manifest.files[doc], doc);
-  assert.deepEqual(Object.keys(manifest.files).filter(name => /\.(?:md|txt)$/.test(name)), ['README.md']);
+  assert.deepEqual(Object.keys(manifest.files).filter(name => /\.(?:md|txt)$/.test(name)), ['crates/oauth-compat-core/LICENSE.oauth-provider.txt', 'README.md']);
   assert.ok(manifest.files.LICENSE);
   assert.equal(Object.keys(manifest.files).some(name => name.startsWith('docs/')), false);
   assert.ok(manifest.files['src/relay/request-budget.mjs']);

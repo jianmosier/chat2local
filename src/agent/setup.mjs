@@ -18,16 +18,19 @@ export class SetupManager {
   origin() { const selected = this.options.identity()?.origin || this.options.defaultRelay || DEFAULT_RELAY; return selected ? relayOrigin(selected, this.options.allowLocal === true) : ''; }
   cancel() { this.active?.abort(Object.assign(new Error('连接已取消；已有目录权限保持不变。'), { status: 409 })); }
   async request(route, body, key, parentSignal) {
+    this.options.lifecycle?.permit();
     const origin = this.origin();
     if (!origin) throw Object.assign(new Error('No private instance is configured.'), { code: 'INSTANCE_REQUIRED' });
     // The deadline includes proxy resolution, not only the later HTTP request.
     // A delayed resolver cannot send credentials after the attempt has expired.
     const timeout = AbortSignal.timeout(this.options.requestTimeoutMs ?? 16_000);
-    const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
+    const signal = AbortSignal.any([timeout, ...(parentSignal ? [parentSignal] : []), ...(this.options.lifecycle ? [this.options.lifecycle.signal] : [])]);
     signal.throwIfAborted();
     await beforeDeadline(this.options.prepareNetwork(origin), signal);
     signal.throwIfAborted();
+    this.options.lifecycle?.permit();
     const response = await beforeDeadline((this.options.fetch ?? fetch)(`${origin}${route}`, { method: body === undefined ? 'GET' : 'POST', headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(key ? { Authorization: `Bearer ${key}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: 'error', signal }), signal);
+    this.options.lifecycle?.permit();
     return response;
   }
   async inspect(signal) {
@@ -52,6 +55,7 @@ export class SetupManager {
     return this.info;
   }
   async start({ onHandoff, allowEnrollment = true } = {}) {
+    this.options.lifecycle?.permit();
     if (!allowEnrollment && !this.options.identity()) throw Object.assign(new Error('请先通过本机主向导连接设备。此恢复入口不会注册新电脑。'), { status: 409 });
     if (this.active) throw Object.assign(new Error('连接正在处理中；不会重复注册或打开配对页。'), { status: 409 });
     const controller = new AbortController(); this.active = controller;
@@ -82,6 +86,7 @@ export class SetupManager {
     }
     signal.throwIfAborted();
     const bridge = this.options.bridge;
+    this.options.lifecycle?.permit();
     if (bridge.state !== 'connected') bridge.start(identity);
     const until = Date.now() + 10_000;
     while (bridge.state !== 'connected' && Date.now() < until) await delay(80, undefined, { signal });
@@ -94,6 +99,7 @@ export class SetupManager {
     // Fragment, not query: no credential is sent in a URL request or referer.
     // User confirms browser binding, then the relay sends them to the real official listing.
     signal.throwIfAborted();
+    this.options.lifecycle?.permit();
     await (onHandoff || this.options.openBrowser)(`${identity.origin}/link#${identity.deviceId}.${handoff.secret}`);
     signal.throwIfAborted();
     this.info = { ...this.info, code: 'BROWSER_OPENED', message: '已打开本机配对确认页。确认后回到同一浏览器中的 ChatGPT 授权页，完成权限确认。无需配对码；这一步还不是文件调用成功。' };

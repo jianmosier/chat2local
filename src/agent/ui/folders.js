@@ -19,6 +19,15 @@ function text(id, value) { const node = $(id); if (node.textContent !== value) n
 function isEditing() { return busy || folderDialog.open || terminalDialog.open || removeDialog.open || $('authorization-dialog').open || $('shutdown-dialog').open; }
 const removeDialog = $('remove-dialog');
 const selected = () => connections.find(c => c.connectionId === $('connection').value);
+const shareProfile = () => draft ? draft.accessProfile : $('share-access-profile').value === 'project' ? 'project' : undefined;
+function renderShareProfile() {
+  const project = shareProfile() === 'project';
+  $('share-access-profile').value = project ? 'project' : 'files';
+  $('share-access-profile').disabled = busy || Boolean(draft);
+  text('share-consent', project
+    ? '读写文件并执行命令。命令可修改或删除目录外文件、访问网络，不保证自动备份。内容经实例与所选应用处理。'
+    : '允许所选应用读取、创建和修改所选目录中的文本文件，不新增终端权限。已有终端权限保持不变。内容经实例与所选应用处理。');
+}
 const folderDialog = $('folder-dialog'), terminalDialog = $('terminal-dialog');
 function element(tag, text, className) {
   const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node;
@@ -63,6 +72,7 @@ async function status() {
   return response.json();
 }
 function controls() {
+  renderShareProfile();
   const frozen = busy || Boolean(draft), unavailable = stopped || managementLocked || !selected() || state?.paused;
   $('open-add').disabled = busy || unavailable || Boolean(state && !selected()?.scopes.includes('files:write'));
   text('open-add', draft && !view?.connected ? '查看待处理' : '＋ 添加文件夹');
@@ -275,7 +285,7 @@ function drawPending() {
   for (const folder of pending) {
     const row = element('div', undefined, 'pending-row');
     const copy = element('div', undefined, 'pending-copy'); copy.append(element('strong', nameOf(folder.path)), element('small', folder.path));
-    copy.append(element('span', draft && draft.accessProfile !== 'project' ? labels[folder.mode] : '文件 + 命令', 'selection-mode'));
+    copy.append(element('span', shareProfile() === 'project' ? '文件 + 命令' : labels[folder.mode], 'selection-mode'));
     const remove = element('button', '×', 'icon-button'); remove.setAttribute('aria-label', '移除 ' + nameOf(folder.path));
     remove.onclick = () => { if (busy || draft) return; pending = pending.filter(item => item !== folder); drawPending(); };
     row.append(copy, remove); $('pending').append(row);
@@ -322,7 +332,7 @@ function showView() {
   $('done').hidden = !view?.connected;
   $('folder-title').textContent = view?.connected ? '添加完成' : view?.requiresConsent ? '确认共享' : view ? '保存结果' : '添加文件夹';
   if (view?.requiresConsent) {
-    text('review-consent', view.accessProfile === 'project' ? '读写文件并执行命令。命令可修改或删除目录外文件、访问网络，不保证自动备份。内容经连接服务与 ChatGPT 处理。' : '保留原有文件权限，不启用命令执行。内容经连接服务与 ChatGPT 处理。');
+    text('review-consent', view.accessProfile === 'project' ? '读写文件并执行命令。命令可修改或删除目录外文件、访问网络，不保证自动备份。内容经连接服务与所选应用处理。' : '按列出的权限共享文件，不新增终端权限。已有终端权限保持不变。内容经连接服务与所选应用处理。');
     $('target').textContent = `${view.deviceName} · ${view.clientName} · ${view.callbackOrigin}`;
     folderList($('summary'), view.selections || []);
   }
@@ -367,7 +377,7 @@ async function addFolders() {
   if (busy || !selected() || !pending.length) return;
   const isNewDecision = !draft;
   busy = true; dialogNote();
-  if (!draft) { draft = { requestId: crypto.randomUUID().replaceAll('-', ''), connectionId: selected().connectionId, accessProfile: 'project', folders: pending.map(f => ({ ...f })) }; saveDraft(); }
+  if (!draft) { draft = { requestId: crypto.randomUUID().replaceAll('-', ''), connectionId: selected().connectionId, ...(shareProfile() === 'project' ? { accessProfile: 'project' } : {}), folders: pending.map(f => ({ ...f })) }; saveDraft(); }
   controls();
   try {
     view = await api('shares/prepare', draft);
@@ -381,6 +391,7 @@ async function addFolders() {
 }
 async function openFolders() {
   if (busy || !selected()) return;
+  if (!draft) $('share-access-profile').value = 'files';
   folderDialog.showModal(); dialogNote(); showView(); controls();
   if (draft) { if (!view) { busy = true; controls(); try { view = await api('shares/prepare', draft); showView(); } catch (error) { dialogNote(error.message); } finally { busy = false; controls(); } } if (view && !view.requiresConsent && !view.connected) await recover(); }
   else { drawPending(); if (!page) await browse(); }
@@ -408,6 +419,7 @@ $('path').onfocus = editPath; $('path').oninput = editPath;
 $('path').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); void browse($('path').value.trim()); } };
 $('add-current').onclick = () => page?.selectable && queue(page.path);
 $('connection').onchange = () => { if (busy || draft) return; ++browses; pending = []; page = null; view = null; renderShared(); controls(); };
+$('share-access-profile').onchange = () => { if (busy || draft) { renderShareProfile(); return; } drawPending(); };
 $('refresh').onclick = async () => { note(); await autoRefresh(true); };
 $('dismiss-message').onclick = () => note();
 function closeTerminal() { if (busy) return; terminalDialog.close(); terminalTarget = null; controls(); }

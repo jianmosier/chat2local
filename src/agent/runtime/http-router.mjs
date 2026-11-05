@@ -6,7 +6,7 @@ import { rootWriteMode } from '../permissions.mjs';
 import { browseFolders } from '../folder-browser.mjs';
 import { recoveryNavigation, recoveryPage, recoveryScript } from '../browser-recovery.mjs';
 import { TERMINAL_CONFIRMATION } from '../terminal.mjs';
-import { bodyJson, boolean, failure, fields, matchesSecret, securityHeaders, selectedPermission } from '../controller-http.mjs';
+import { bodyJson, boolean, failure, fields, matchesSecret, rejectDuplicateSecurityHeaders, securityHeaders, selectedPermission } from '../controller-http.mjs';
 import { uiAsset } from '../ui-assets.mjs';
 import { authorizationReturn } from '../../shared/authorization-navigation.mjs';
 import { terminalPermission } from '../../shared/terminal-permission.mjs';
@@ -15,7 +15,7 @@ import { terminalPermission } from '../../shared/terminal-permission.mjs';
 export function createHttpRouter({
   state, getOrigin, token, store, uiDir, setup, picker, recovery, recoveryBinding,
   accountOnboarding, instanceOnboarding, managementSessions, folderManagement, shareRemoval,
-  status, connectionState, existingRoot, changePolicy, serial, mutate,
+  status, connectionState, existingRoot, changePolicy, serial, mutate, lifecycle,
 }) {
   return (request, response) => {
     const origin = getOrigin();
@@ -24,8 +24,10 @@ export function createHttpRouter({
       response.writeHead(code, { ...securityHeaders, 'Content-Type': `${type}; charset=utf-8`, ...extraHeaders });
       response.end(type === 'application/json' ? JSON.stringify(data) : data);
     };
-    void (async () => {
-      if (state.closing) throw failure(503, 'Controller is closing.');
+    return (async () => {
+      rejectDuplicateSecurityHeaders(request);
+      const faultControl = lifecycle?.fault && ['/api/status', '/api/pause', '/api/disconnect', '/api/shutdown', '/api/root/remove', '/api/account-root/remove'].includes(request.url);
+      if (state.closing && !faultControl) throw failure(503, 'Controller is closing.');
       if (request.headers.host !== new URL(origin).host) throw failure(403, 'Invalid Host.');
       if (request.headers.origin && request.headers.origin !== origin) throw failure(403, 'Invalid Origin.');
       const accountNavigation = request.method === 'GET' && ['/account-connect', '/instance-connect'].includes(request.url)
@@ -105,6 +107,10 @@ export function createHttpRouter({
         if (request.method !== 'POST') throw failure(405, 'POST required.');
         if (request.headers.origin !== origin) throw failure(403, 'Same-origin confirmation required.');
         const value = await bodyJson(request);
+        if (faultControl) {
+          if (route === '/api/pause' && value.paused !== true) throw failure(503, 'Lifecycle failed; only restricting access is available.');
+          send(200, await mutate(route.slice(5), value)); return;
+        }
         if (route === '/api/management/session') {
           fields(value, []);
           const session = await managementSessions.establish(request.headers.cookie, launcherAuthenticated);

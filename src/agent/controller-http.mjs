@@ -83,3 +83,14 @@ export async function bodyJson(request) {
     throw failure(400, 'Invalid JSON.');
   }
 }
+
+// Narrow malformed-input hardening shared by all local navigation/API routes.
+export function rejectDuplicateSecurityHeaders(request) {
+  const names = new Set(['host', 'origin', 'x-chat2local-token', 'x-chat2local-manager', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user']);
+  const seen = new Set();
+  for (let i = 0; i < (request.rawHeaders?.length || 0); i += 2) {
+    const name = request.rawHeaders[i].toLowerCase();
+    if (names.has(name) && seen.has(name)) throw failure(400, 'Duplicate security header.');
+    seen.add(name);
+  }
+}

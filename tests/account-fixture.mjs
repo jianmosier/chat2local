@@ -1,5 +1,5 @@
 import { AccountIdentity, AccountRepository } from '../src/relay/account-identity.mjs';
-import { AccountDirectory } from '../src/relay/account-directory.mjs';
+import { AccountDirectory } from './registry-fixture.mjs';
 import { randomSecret } from '../src/shared/protocol.mjs';
 
 /** Isolated storage and identity fixtures. Not a production login/verifier. */
@@ -15,12 +15,13 @@ export class TransactionalMemory {
     this.tail = result.catch(() => {}); return result;
   }
 }
-export async function accountFixture() {
+export async function accountFixture(options = {}) {
+  const { runner } = options;
   let now = Date.now();
   const sessions = new Map(), proofs = new Map();
   const storage = new TransactionalMemory();
   const identity = new AccountIdentity({ now: () => now, verifySession: async request => sessions.get(request.headers.get('Fixture-Session')) || null });
-  const directory = new AccountDirectory(storage, { now: () => now, verifyDeviceConsent: async ({ proof, intent }) => {
+  const directory = new AccountDirectory(storage, { ...(Object.hasOwn(options,'runner') ? { runner } : {}), now: () => now, verifyDeviceConsent: async ({ proof, intent }) => {
     const value = proofs.get(proof);
     return value?.intentId === intent.id ? structuredClone(value) : null;
   } });

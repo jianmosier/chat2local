@@ -50,15 +50,17 @@ export async function terminalCwd(root, relative = '.') {
 }
 
 /** Request termination of the attached process tree; detached descendants may survive. */
-export function terminateProcessTree(child, record) {
+export async function terminateProcessTree(child, record) {
   try {
     if (process.platform === 'win32') {
       const file = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
       const killer = spawn(file, ['/PID', String(child.pid), '/T', '/F'], {
         shell: false, windowsHide: true, stdio: 'ignore',
       });
-      killer.once('error', () => { record.terminationConfirmed = false; });
-      killer.once('close', code => { record.terminationConfirmed = code === 0; });
+      record.terminationConfirmed = await new Promise(resolve => {
+        killer.once('error', () => resolve(false));
+        killer.once('close', code => resolve(code === 0));
+      });
     } else {
       process.kill(-child.pid, 'SIGKILL');
       record.terminationConfirmed = true;
@@ -66,4 +68,5 @@ export function terminateProcessTree(child, record) {
   } catch {
     record.terminationConfirmed = false;
   }
+  return record.terminationConfirmed;
 }

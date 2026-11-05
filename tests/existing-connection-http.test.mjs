@@ -1,3 +1,4 @@
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -32,9 +33,9 @@ test('original enrolled Windows recovery: NO invitation, NO picker, ONE client c
     return response;
   } });
   t.after(async () => { await app.close(); await fs.rm(base, { recursive: true, force: true }); });
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
   const enrollmentKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', PRIVATE_INSTANCE: 'true', ENROLLMENT_KEY: enrollmentKey, TEST_RECOVERY_ORIGIN: app.origin } }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', PRIVATE_INSTANCE: 'true', ENROLLMENT_KEY: enrollmentKey, TEST_RECOVERY_ORIGIN: app.origin } }));
   t.after(() => mf.dispose());
   const origin = (await mf.ready).origin;
   const local = (route, body) => fetch(app.origin + '/api/' + route, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Chat2Local-Token': app.token, Origin: app.origin, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });

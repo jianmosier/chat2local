@@ -1,0 +1,15 @@
+{
+  "node": "v24.21.0",
+  "openssl": "3.5.8",
+  "rootCount": 121,
+  "rootsSha256": "1f20173c6c5bd4e836fbd5d025ec4eb7464e1521439cde2fea0aca3122c7a1a9",
+  "defaultCiphers": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA",
+  "defaultGroups": "auto",
+  "minimum": "TLSv1.2",
+  "maximum": "TLSv1.3",
+  "chainFlags": [
+    "TRUSTED_FIRST"
+  ],
+  "hostnameSource": "https://github.com/nodejs/node/blob/v24.21.0/lib/tls.js",
+  "rootSource": "https://github.com/nodejs/node/blob/v24.21.0/src/node_root_certs.h"
+}

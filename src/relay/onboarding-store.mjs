@@ -1,6 +1,7 @@
 import { randomSecret, sha256 } from '../shared/protocol.mjs';
 import { AccountDirectory } from './account-directory.mjs';
 import { exactFields, isAccountId, isDigest } from '../shared/connection-access.mjs';
+import { registryTransaction } from './registry-transaction.mjs';
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const flowKey = id => 'onboarding:v1:flow:' + id;
@@ -11,8 +12,8 @@ const validActor = actor => { exactFields(actor, ['identityKey','sessionBinding'
  * No public API can supply actor, authRequest, deviceEpoch or a native proof flag.
  */
 export class OnboardingStore {
-  constructor(storage, now = Date.now) { this.storage = storage; this.now = now; }
-  directory(options = {}) { return new AccountDirectory(this.storage, { now: this.now, assertActorCurrent: (tx, actor) => this.activeSession(actor, tx), ...options }); }
+  constructor(storage, now = Date.now, runner) { this.storage = storage; this.now = now; this.runner = runner; }
+  directory(options = {}) { return new AccountDirectory(this.storage, { runner: this.runner, currentGuard: { kind: 'activeSession' }, now: this.now, assertActorCurrent: (tx, actor) => this.activeSession(actor, tx), ...options }); }
   async activeSession(actor, tx = this.storage) {
     validActor(actor);
     const bound = await tx.get('onboarding:v1:session-binding:' + actor.sessionBinding);
@@ -26,7 +27,7 @@ export class OnboardingStore {
       if (typeof value?.issuer !== 'string' || typeof value.subject !== 'string' || !isDigest(value.sessionId) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= this.now()) throw fail('Invalid verified session record.', 400);
       binding = { id: await sha256(JSON.stringify([value.issuer, value.subject, value.sessionId])), identityKey: await sha256(JSON.stringify([value.issuer, value.subject])) };
     }
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'onboarding.records', { action, kind, key, value, ttl, binding }, async tx => {
       const current = await tx.get(key);
       if (action === 'get') return current?.until > this.now() ? current.value : null;
       if (action === 'take') {
@@ -42,7 +43,7 @@ export class OnboardingStore {
       await tx.put(key, { value, until, ...(binding ? { bindingId: binding.id } : {}) });
       if (binding) await tx.put('onboarding:v1:session-binding:' + binding.id, { identityKey: binding.identityKey, until: Math.min(until, value.expiresAt) });
       return { saved: true };
-    });
+    }, { now: this.now });
   }
   async connections({ actor, resource }) {
     await this.activeSession(actor);
@@ -77,13 +78,13 @@ export class OnboardingStore {
     const scopeUpgrade = Boolean(connections[0] && scopes.some(s => !connections[0].scopes.includes(s)));
     if (scopeUpgrade && mode !== 'oauth') throw fail('Adding a device cannot expand the original OAuth scopes.', 403);
     const value = { id, mode, scopeUpgrade, actor, accountId, displayName: String(displayName).slice(0, 120), clientName: String(clientName).slice(0, 120), authRequest, resource, scopes, connectionId: connections[0]?.connectionId || null, bootstrapHash: await sha256(bootstrap), browserHash: await sha256(browser), createdAt: this.now(), until: this.now() + 86400000, finishTaken: false };
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'onboarding.flow.create', { actor, id, value }, async tx => {
       await this.activeSession(actor, tx);
       const entries = await tx.list({ prefix: 'onboarding:v1:flow:', limit: 201 });
       for (const [key, record] of entries) if (record.until <= this.now()) await tx.delete(key);
       if ([...entries.values()].filter(record => record.until > this.now()).length >= 200) throw fail('Connection setup is busy.', 429);
       await tx.put(flowKey(id), value);
-    });
+    }, { now: this.now });
     return { flowId: id, bootstrap, browser };
   }
   async provision({ flowId, bootstrap, deviceId, keyHash, sessionHash }) {
@@ -92,7 +93,7 @@ export class OnboardingStore {
     const candidate = await this.storage.get(flowKey(flowId));
     if (!candidate) throw fail('Account setup not found.', 401);
     await this.activeSession(candidate.actor);
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'onboarding.device.provision', { flowId, proofHash, deviceId, keyHash, sessionHash }, async tx => {
       const flow = await tx.get(flowKey(flowId));
       if (flow) await this.activeSession(flow.actor, tx);
       if (!flow || flow.bootstrapHash !== proofHash || this.now() > flow.createdAt + 300000) throw fail('Sign in before registering a computer.', 401);
@@ -111,7 +112,7 @@ export class OnboardingStore {
       }
       flow.provision = { deviceId, keyHash, sessionHash }; await tx.put(flowKey(flowId), flow);
       return { reserved: true }; // Registering a device grants NO file access.
-    });
+    }, { now: this.now });
   }
   async native({ action, flowId, secret, device, input = {} }) {
     if (!isAccountId(flowId) || !isDigest(secret) || !isAccountId(device?.deviceId) || !isDigest(device?.epoch)) throw fail('Authenticated native flow required.', 401);
@@ -124,7 +125,7 @@ export class OnboardingStore {
     if (action === 'start') {
       exactFields(input, ['sessionSecret']); if (!isDigest(input.sessionSecret)) throw fail('Invalid native session.', 400);
       const nativeHash = await sha256(input.sessionSecret);
-      flow = await this.storage.transaction(async tx => {
+      flow = await registryTransaction(this.storage, this.runner, 'onboarding.native.start', { flowId, device, credentialHash, nativeHash }, async tx => {
         const item = await tx.get(flowKey(flowId));
         if (item) await this.activeSession(item.actor, tx);
         if (!item || item.until <= this.now() || item.bootstrapHash !== credentialHash || this.now() > item.createdAt + 300000) throw fail('This account setup link expired.', 401);
@@ -132,7 +133,7 @@ export class OnboardingStore {
         if (item.device && (item.device.deviceId !== device.deviceId || item.device.epoch !== device.epoch || item.nativeHash !== nativeHash)) throw fail('Setup link already belongs to another native session.', 403);
         item.device = { deviceId: device.deviceId, epoch: device.epoch }; item.nativeHash = nativeHash;
         await tx.put(flowKey(flowId), item); return item;
-      });
+      }, { now: this.now });
       return { flowId, accountId: flow.accountId, displayName: flow.displayName, clientId: flow.authRequest.clientId, clientName: flow.clientName, resource: flow.resource, deviceId: device.deviceId, deviceEpoch: device.epoch, scopes: flow.scopes, requestDigest: await sha256(JSON.stringify(flow.authRequest)), connectionId: flow.connectionId, callbackOrigin: new URL(flow.authRequest.redirectUri).origin };
     }
     flow = await this.storage.get(flowKey(flowId));
@@ -168,12 +169,12 @@ export class OnboardingStore {
     if (flow.mode === 'join') return { joined: true, accountId: flow.accountId, connectionId: intent.connectionId };
     // Single issuance. An uncertain completeAuthorization result cannot blindly
     // issue a second code. A new OAuth request can retain activated folder grants.
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'onboarding.finish.take', { actor, flowId, browserHash: flow.browserHash }, async tx => {
       await this.activeSession(actor, tx);
       const latest = await tx.get(flowKey(flowId));
       if (!latest || latest.finishTaken || latest.browserHash !== flow.browserHash) throw fail('Authorization continuation was already used.');
       latest.finishTaken = true; await tx.put(flowKey(flowId), latest);
-    });
+    }, { now: this.now });
     return { authRequest: flow.authRequest, accountId: flow.accountId, grant };
   }
 }
