@@ -59,6 +59,20 @@
   el('cancel-guide').onclick = () => action(() => api('guide/cancel', { attemptId: guide.attemptId }));
   el('save-session-tools').onclick = () => action(() => { if (!guide?.attemptId) throw Error('请先开始目录验证步骤。'); return api('guide/session-tools', { attemptId: guide.attemptId, tools: el('session-tools').value.split(/[\s,，]+/).filter(Boolean) }); });
   el('save-startup').onclick = () => action(() => api('startup', { enabled: el('startup').checked }));
+  let quitting = false;
+  el('quit').onclick = async () => {
+    if (busy || quitting) return;
+    quitting = true; busy = true;
+    for (const button of el('controls').querySelectorAll('button')) button.disabled = true;
+    try {
+      await api('shutdown', {});
+      token = ''; try { sessionStorage.removeItem(storageKey); } catch {}
+      el('controls').hidden = true;
+      say('已提交正常退出。进程结束后可运行新版或保留版本的安装程序；目录、设备身份和权限已保留。');
+    } catch {
+      say('退出结果未确认。请重新打开管理入口核对状态；未自动重复发送退出请求。');
+    }
+  };
   el('manage-shares').onclick = event => { event.preventDefault(); sessionStorage.setItem('chat2local-control', token); location.assign('/shares'); };
   el('import-invitation').onclick = () => action(async () => { const result = await api('instance/import-invitation', { url: el('instance-invitation').value }); el('instance-invitation').value = ''; el('setup-message').textContent = '实例入口已保存：' + result.origin + '。尚未授权目录，请回到原实例页面继续。'; });
   el('inspect-setup').onclick = () => action(async () => { const result = await api('setup/inspect', {}); el('setup-message').textContent = result.message; const link = el('account-entry'); link.hidden = true; if (result.accountEntryUrl) { const url = new URL(result.accountEntryUrl); if (['https:', 'http:'].includes(url.protocol) && url.pathname === '/account/add' && !url.username && !url.password && !url.search && !url.hash) { link.href = url.href; link.hidden = false; } } });

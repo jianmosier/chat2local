@@ -246,6 +246,9 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-A', exact: true }).check();
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-B', exact: true }).check();
   assert.equal(await pageC.locator('#pending select').count(), 0);
+  assert.equal(await pageC.locator('#share-access-profile').inputValue(), 'files');
+  assert.match(await pageC.locator('#editor .consent').innerText(), /不新增终端权限/);
+  await pageC.locator('#share-access-profile').selectOption('project');
   assert.match(await pageC.locator('#editor .consent').innerText(), /目录外文件/);
   assert.equal((await storeC.load()).config.terminalGrants?.length || 0, 0);
   await pageC.route('**/api/shares/confirm', async route => {

@@ -8,7 +8,7 @@
 
 准备自己的 Cloudflare 账号，以及能添加自定义 MCP 服务的应用账号。各应用的账号、地区及功能开放条件以其当前界面为准。
 
-在仓库选择 **Code → Download ZIP**，解压后打开终端。普通安装器仍使用 Node.js Agent；[已发布的 0.1.0-alpha.28 安装包](https://github.com/jianmosier/chat2local/releases/tag/v0.1.0-alpha.28) 不会因源码更新自动变成 Rust 版本。
+从 [Release 0.1.0-alpha.29](https://github.com/jianmosier/chat2local/releases/tag/v0.1.0-alpha.29) 下载 Windows x64 安装包，解压后双击 start-chat2local.cmd。日常 Agent 使用 Rust；包内 Node 仅用于安装与实例接入。macOS 安装包继续使用 Node Agent。Windows ARM64 暂无本次原生安装包。首次创建自己的云端实例时，在源码目录运行：
 
 Windows PowerShell：
 
@@ -20,7 +20,7 @@ macOS 终端：
 
 按提示登录 Cloudflare，创建自己的实例，将提供的 /mcp 地址添加到 ChatGPT 或 Gemini，再在本机核对请求应用、电脑、目录和权限后确认。首次连接需要在运行 Agent 的电脑上完成本地确认。
 
-Windows Rust 原生 Agent 已在现有授权数据上完成实际使用：Gemini 项目文件读写、ChatGPT 设备和目录查询。它仍是部分功能的原生候选，尚未提供新的预编译 Release；构建入口见下方开发说明。
+Windows Rust 原生 Agent 已完成 Gemini 项目文件读写、ChatGPT 设备和目录查询的实际使用。它保留已有授权和数据，仍有下方列明的功能限制。首次自建实例的安装器会校验并获取同版本 Windows 预编译包，不要求用户安装 Rust 编译环境。
 
 ## 2. 回连
 
@@ -50,6 +50,10 @@ Agent 运行期间主动通过 WSS 连接云端，网络恢复后自动回连。
 
 **终端不是操作系统沙箱**：命令以当前系统用户权限运行，可访问共享目录以外的文件和网络。终端操作没有自动备份，取消任务不会回滚已发生的修改。
 
+**升级**：在原生面板点击“完全退出”，等待退出完成，再运行新版安装包。安装器会验证程序和辅助文件、保存到独立版本目录，确认新进程后原子切换管理入口；旧程序包仍保留。正在运行或归属不明时拒绝切换，不强停、不重置授权。若已开启旧版登录启动，先在旧面板关闭，升级后在新面板重新开启。
+
+**回退**：正常退出后，使用当前安装包的 runtime/node.exe 运行 scripts/install-portable.mjs --rollback，参数填写保留的原生安装目录绝对路径。只切换已校验的程序；保留当前目录授权、撤销记录、身份和数据，不恢复旧状态文件。未完成写入或进程归属不明时应先处理原问题。
+
 云端实例与本机客户端分别更新。内容经自己的实例与所选 AI 应用处理。普通更新应保留原域名、存储、设备身份和已有权限。
 
 <details>
@@ -64,7 +68,7 @@ flowchart LR
 
 本机 Windows 原生候选包含连接与重连、文件操作、审批历史、终端、平台适配及本地授权管理，沿用原设置和 CurrentUser DPAPI 数据。fullAgent=false、upgradeReady=false；通用设备注册、配对码和断开身份入口尚未覆盖。网页仍是 HTML / CSS / JavaScript，内嵌在原生程序中。
 
-云端 Rust Device、Registry、OAuth 和 OIDC 模块是独立构建候选。本机读写成功不代表完整云端 Rust 部署。默认 Worker 和普通安装器仍走现有 JavaScript 路径；原生程序通过自己的入口启动。
+云端 Rust Device、Registry、OAuth 和 OIDC 模块是独立构建候选。本机读写成功不代表完整云端 Rust 部署。默认 Worker 保持 JavaScript，Windows x64 安装包明确选择 Rust Agent。现阶段网关以鉴权、存储和网络转发为主，未证实云端 Rust 的性能收益，暂不为统一语言扩大迁移。
 
 crates/ 是 Rust 工作区；src/agent/ 保留 Node.js 兼容实现；src/relay/ 是网关及 Rust 模块适配；scripts/ 包含构建、校验和公开导出工具。
 
@@ -73,15 +77,15 @@ crates/ 是 Rust 工作区；src/agent/ 保留 Node.js 兼容实现；src/relay/
     npm ci --ignore-scripts
     npm run check
 
-在 Windows C++ 开发环境中，将 CHAT2LOCAL_OPENSSL_DIR、CHAT2LOCAL_OPENSSL_MANIFEST、CHAT2LOCAL_OPENSSL_MANIFEST_SHA256 分别指向自己的安装目录、逐文件 SHA-256 JSON 清单及清单自身的 SHA-256。清单中的 install/ 必须与安装目录对应，至少包含头文件、libssl.lib、libcrypto.lib 和 openssl.exe；构建器会校验所有列出的文件。
+在 Windows C++ 开发环境中，将 CHAT2LOCAL_OPENSSL_DIR、CHAT2LOCAL_OPENSSL_MANIFEST、CHAT2LOCAL_OPENSSL_MANIFEST_SHA256 分别指向自己的安装目录、逐文件 SHA-256 JSON 清单及清单自身的 SHA-256。清单中的 install/ 必须与安装目录对应，至少包含头文件、libssl.lib、libcrypto.lib 和 openssl.exe；构建器会校验所有列出的文件。公开发布的 OpenSSL 应使用 no-filenames 与通用默认目录构建，避免把私人构建目录编入安装包；Rust 构建器也会重映射并检查路径。
 
     node scripts/build-native-agent.mjs --openssl-dir "$env:CHAT2LOCAL_OPENSSL_DIR" --openssl-manifest "$env:CHAT2LOCAL_OPENSSL_MANIFEST" --openssl-manifest-sha256 "$env:CHAT2LOCAL_OPENSSL_MANIFEST_SHA256"
     .\.artifacts\native-agent\chat2local-native-agent.exe --launch
 
-使用原 Windows 用户和原状态目录，先正常停止旧 Agent，避免同时运行两个宿主。不要为切换原生程序删除授权数据。npm start 仍启动 Node.js 兼容入口。
+使用原 Windows 用户和原状态目录，先正常停止旧 Agent，避免同时运行两个宿主。不要为切换原生程序删除授权数据。源码目录 npm start 保留 Node.js 兼容入口；原生安装包的管理入口直接启动已校验 Rust 程序，不静默回退。
 
-npm run build:public 只导出清单中的公开文本源码，排除个人配置、设备身份、构建缓存和私人交接。npm run release 是另一项发布操作；源码同步不等于生成新安装包或更新云端。
+npm run build:public 只导出清单中的公开文本源码，排除个人配置、设备身份、构建缓存和私人交接。设置 CHAT2LOCAL_NATIVE_AGENT_RELEASE_EXECUTABLE 指向刚构建的原生 EXE 后，npm run release 会强制执行原生验证，并准备同源码的发布包；发布时还需 --publish --commit 明确指定已推送并审查的提交。发布不会合并 PR 或更新云端。构建默认 Cargo release 模式，并打包应用目录内的 Microsoft CRT 与第三方许可证。
 
 </details>
 
-0.1.0-alpha.28 · [MIT License](LICENSE)
+0.1.0-alpha.29 · [MIT License](LICENSE)

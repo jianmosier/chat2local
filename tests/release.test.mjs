@@ -6,7 +6,8 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { releaseOptions, validateRepository, syncSnapshot, publicationCloneArgs } from '../scripts/release.mjs';
+import { releaseOptions, validateRepository, syncSnapshot, publicationCloneArgs, verifyPublishedTree, inputFingerprint } from '../scripts/release.mjs';
+import { rustSourceFiles, publicDocuments } from '../scripts/build-public.mjs';
 import { checkSource } from '../scripts/check-source.mjs';
 const execFileAsync = promisify(execFile);
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -104,7 +105,41 @@ test('task preparation and retry never add publication arguments', { timeout: 30
 });
 test('release publication code pins commit, verifies downloaded assets and never force-pushes or clobbers', async () => {
   const source=await fs.readFile('scripts/release.mjs','utf8');
-  assert.match(source,/--target',commit/);assert.match(source,/--draft/);assert.match(source,/release','download/);
-  assert.match(source,/users\.noreply\.github\.com/);assert.match(source,/inputFingerprint/);
+  assert.match(source,/'--target', options.commit/);assert.match(source,/--draft/);assert.match(source,/'release', 'download'/);
+  assert.match(source,/verifyPublishedTree/);assert.match(source,/inputFingerprint/);
   assert.doesNotMatch(source,/'--force'|'--clobber'|'--mirror'/);
+  assert.doesNotMatch(source.slice(source.indexOf('export async function publishRelease')), /git\(\['push'|git\(\['add'|core\.hooksPath|commit\.gpgsign/);
+});
+
+test('release targets an exact reviewed remote tree and rejects stale, missing and unsafe blobs', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-release-tree-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await fs.writeFile(path.join(directory, 'README.md'), 'reviewed source');
+  await fs.writeFile(path.join(directory, 'SOURCE-SHA256.json'), JSON.stringify({ files: { 'README.md': hash('reviewed source') } }));
+  const tree = { truncated: false, tree: [] };
+  for (const name of ['README.md', 'SOURCE-SHA256.json']) {
+    const bytes = await fs.readFile(path.join(directory, name));
+    tree.tree.push({ path: name, type: 'blob', mode: '100644', sha: createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex') });
+  }
+  await verifyPublishedTree(tree, directory);
+  await assert.rejects(verifyPublishedTree({ ...tree, truncated: true }, directory), /inventory/);
+  await assert.rejects(verifyPublishedTree({ tree: tree.tree.slice(1) }, directory), /inventory/);
+  await assert.rejects(verifyPublishedTree({ tree: [{ ...tree.tree[0], mode: '120000' }, tree.tree[1]] }, directory), /unsafe/);
+  await assert.rejects(verifyPublishedTree({ tree: [...tree.tree, { type: 'commit', mode: '160000', path: 'extra', sha: 'a'.repeat(40) }] }, directory), /unsupported/);
+  await assert.rejects(verifyPublishedTree({ tree: [...tree.tree, { type: 'tree', mode: '040000', path: 'extra', sha: 'a'.repeat(40) }] }, directory), /unexpected/);
+  await fs.writeFile(path.join(directory, 'README.md'), 'changed');
+  await assert.rejects(verifyPublishedTree(tree, directory), /differs/);
+  assert.throws(() => releaseOptions(['--commit', 'main']), /exact reviewed/);
+});
+
+test('release freshness covers launchers and Rust inputs as well as application modules', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-release-input-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixed = ['package.json', 'package-lock.json', 'install.sh', 'install.ps1', 'start-chat2local.cmd', 'start-chat2local.sh', 'LICENSE', 'tsconfig.json', 'wrangler.jsonc', '.gitignore', ...publicDocuments, ...rustSourceFiles];
+  for (const name of new Set(fixed)) { await fs.mkdir(path.dirname(path.join(directory, name)), { recursive: true }); await fs.writeFile(path.join(directory, name), 'fixture'); }
+  for (const name of ['src', 'scripts', 'tests']) await fs.mkdir(path.join(directory, name), { recursive: true });
+  const original = await inputFingerprint(directory);
+  for (const name of ['start-chat2local.cmd', 'start-chat2local.sh', 'LICENSE', 'tsconfig.json', 'Cargo.toml', 'crates/agent-controller/src/native.rs']) {
+    await fs.writeFile(path.join(directory, name), 'changed');
+    assert.notEqual(await inputFingerprint(directory), original, name);
+    await fs.writeFile(path.join(directory, name), 'fixture');
+  }
 });

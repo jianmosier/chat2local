@@ -13,6 +13,7 @@ import { configuredTerminalRunner } from '../src/agent/terminal/rust-process-run
 import { configuredTerminalStore } from '../src/agent/terminal/rust-job-store.mjs';
 import { configuredLifecycle } from '../src/agent/runtime/rust-lifecycle.mjs';
 import { assertWriteFenceClear } from '../src/agent/files/write-fence.mjs';
+import { runNative } from './native-package.mjs';
 
 const entry = fileURLToPath(new URL('../src/agent/main.mjs', import.meta.url));
 const store = new Store();
@@ -26,6 +27,20 @@ async function verifiedSession() {
   } catch { return null; }
 }
 async function launch() {
+  if (process.argv.slice(2).some(arg => !['--no-browser','--manage'].includes(arg))) throw new Error('Unknown launcher argument.');
+  const directory = fileURLToPath(new URL('..', import.meta.url));
+  let manifest;
+  try { manifest = JSON.parse(await fs.readFile(path.join(directory, 'BUILD-MANIFEST.json'), 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw Error('Package manifest is invalid. No runtime fallback was attempted.'); }
+  if (manifest?.runtimeKind === 'rust-native') {
+    const { verifyPackage } = await import('./install-portable.mjs');
+    await verifyPackage(directory);
+    await assertWriteFenceClear(store.directory);
+    const receipt = await runNative(directory, ['--launch', ...((process.argv.includes('--no-browser') || process.env.CHAT2LOCAL_NO_BROWSER === '1') ? ['--no-browser'] : [])], { stateDirectory: store.directory });
+    console.log(JSON.stringify(receipt));
+    return;
+  }
+  if (manifest?.runtimeKind !== undefined && manifest.runtimeKind !== 'node-legacy') throw Error('Unknown runtime kind. No runtime fallback was attempted.');
   // Validate the explicit local switch before touching the user's state.
   configuredReadonlyBackend();
   configuredWriterBackend();
@@ -34,7 +49,6 @@ async function launch() {
   configuredTerminalStore();
   configuredLifecycle();
   await assertWriteFenceClear(store.directory);
-  if (process.argv.slice(2).some(arg => !['--no-browser','--manage'].includes(arg))) throw new Error('Unknown launcher argument.');
   const showBrowser = !process.argv.includes('--no-browser') && process.env.CHAT2LOCAL_NO_BROWSER !== '1';
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 24 || major >= 27) throw new Error('This development preview requires Node.js 24–26.');

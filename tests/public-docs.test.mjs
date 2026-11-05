@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 test('public documentation links and versions match the exported contract', async () => {
   assert.deepEqual(publicDocuments, ['README.md']);
   const files = [...publicDocuments];
-  const allowed = new Set(files);
+  const allowed = new Set([...files, 'LICENSE']);
   for (const relative of files) {
     const text = await fs.readFile(path.join(root, relative), 'utf8');
     assert.ok(text.includes(VERSION), relative + ' lacks the current version');

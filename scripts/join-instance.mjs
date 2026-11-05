@@ -32,7 +32,8 @@ export async function joinInvitation(value, options = {}) {
   if (options.launch) await options.launch();
   else await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./launch.mjs', import.meta.url)), '--no-browser'], { timeout: 20000, windowsHide: true, maxBuffer: 8192 });
   const store = options.store || new Store();
-  const session = await store.readSession();
+  let session;
+  try { session = await store.readSession(); } catch { throw Error('The protected local session could not be read. No invitation was sent.'); }
   const expectedOrigin = options.localOrigin || 'http://127.0.0.1:47631';
   const local = new URL(expectedOrigin);
   if (local.protocol !== 'http:' || local.hostname !== '127.0.0.1' || local.pathname !== '/' || local.search || local.hash || local.username || local.password || session.origin !== expectedOrigin || !/^[a-f0-9]{64}$/.test(session.token)) throw new Error('No verified local Chat2Local instance; no invitation was sent.');
@@ -40,7 +41,8 @@ export async function joinInvitation(value, options = {}) {
   const headers = { 'X-Chat2Local-Token': session.token };
   const check = await request(expectedOrigin + '/api/status', { headers, redirect: 'error', signal: AbortSignal.timeout(4000) });
   const state = check.ok ? await check.json() : null;
-  if (state?.name !== 'chat2local' || state.instanceId !== session.instanceId) throw new Error('Local instance identity did not match; no invitation was sent.');
+  const native = session.profile === 'chat2local-native-agent' && session.fixtureOnly === false && session.fullAgent === false;
+  if ((native ? state?.name !== 'chat2local-native-agent' || state.fixtureOnly !== false || state.fullAgent !== false || state.upgradeReady !== false : state?.name !== 'chat2local') || state.instanceId !== session.instanceId) throw new Error('Local instance identity did not match; no invitation was sent.');
   const response = await request(expectedOrigin + '/api/instance/import-invitation', { method: 'POST', headers: { ...headers, Origin: expectedOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ url: invitation.inviteUrl }), redirect: 'error', signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new Error(`Local invitation import failed (${response.status}); existing identity/permissions were not replaced.`);
   const imported = await response.json();

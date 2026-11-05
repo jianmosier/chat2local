@@ -148,7 +148,7 @@ fn uuid() -> Result<String> {
     ))
 }
 pub fn version() -> serde_json::Value {
-    json!({"name":NAME,"fixtureOnly":cfg!(feature="fixture"),"fullAgent":false,"upgradeReady":false,"version":"0.1.0-alpha.28","openssl":openssl::version::version(),"routes":ROUTES,"unsupported":["disconnect","general-enroll","pair-code"],"bridgeTools":["list_devices","list_roots","list_directory","read_file","write_file","propose_write","operation_status","terminal_execute","terminal_status","terminal_cancel"],"terminalAvailable":true,"localPanel":true})
+    json!({"name":NAME,"fixtureOnly":cfg!(feature="fixture"),"fullAgent":false,"upgradeReady":false,"version":"0.1.0-alpha.29","openssl":openssl::version::version(),"routes":ROUTES,"unsupported":["disconnect","general-enroll","pair-code"],"bridgeTools":["list_devices","list_roots","list_directory","read_file","write_file","propose_write","operation_status","terminal_execute","terminal_status","terminal_cancel"],"terminalAvailable":true,"localPanel":true})
 }
 pub struct Options {
     pub directory: PathBuf,

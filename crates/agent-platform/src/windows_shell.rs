@@ -267,6 +267,26 @@ impl ShellFile {
     pub fn publish(&self, destination: &Path) -> Result<()> {
         super::windows_terminal_store::rename_handle(&self.file, destination, 0)
     }
+    /// Replace the checked immutable entry at the same optimistic commit boundary
+    /// used by Store publication. Callers retain verified previous bytes first.
+    pub fn replace_checked(&self, destination: &Path, previous: Self) -> Result<()> {
+        let named = super::windows_write::handle(
+            destination,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            None,
+        )?;
+        if shell_file_identity(&named)? != previous.identity()? {
+            return Err(denied());
+        }
+        // Normal Windows replacement rejects an open destination, including a
+        // metadata-only handle. Close only these snapshots at commit, keeping
+        // the prepared file and caller's directory/session guards held.
+        drop(named);
+        drop(previous);
+        super::windows_terminal_store::rename_handle(&self.file, destination, 3)
+    }
 }
 pub fn hold_shell_read(path: &Path) -> Result<File> {
     open(path, false)
@@ -287,5 +307,22 @@ fn shell_publication_never_replaces_an_unchecked_arrival() {
     assert!(held.publish(&target).is_err());
     assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
     drop(held);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+#[test]
+fn shell_checked_replacement_holds_the_old_entry_and_its_directory() {
+    let directory = std::env::temp_dir().join(format!("c2l-shell-replace-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let held_directory = ShellDirectory::open(&directory).unwrap();
+    let source = held_directory.path.join("prepared.tmp");
+    let target = held_directory.path.join("Chat2Local.cmd");
+    std::fs::write(&source, b"prepared").unwrap();
+    std::fs::write(&target, b"previous").unwrap();
+    let prepared = ShellFile::open(&source).unwrap().unwrap();
+    let previous = ShellFile::open(&target).unwrap().unwrap();
+    assert_eq!(previous.snapshot().unwrap(), b"previous");
+    prepared.replace_checked(&target, previous).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"prepared");
+    drop((prepared, held_directory));
     std::fs::remove_dir_all(directory).unwrap();
 }

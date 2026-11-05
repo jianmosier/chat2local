@@ -10,5 +10,5 @@
 <section><h2>待审批修改</h2><p>核对操作内容后逐项批准或拒绝。</p><div id="pending"></div><details><summary>最近操作记录</summary><pre id="events"></pre></details></section>
 <section><h2>验证 AI 连接</h2><p>验证流程需要明确的直接读写授权。完成状态只由远程实际创建、更新和读回文件确认。</p><button id="authorize-guide" type="button">允许读写并继续</button><p id="guide-stage"></p><pre id="guide-prompt"></pre><button id="cancel-guide" type="button" hidden>取消验证步骤（保留目录权限）</button></section>
 <section><h2>报告当前会话工具</h2><p>根据 AI 会话实际提供的工具填写。此观察不会授予文件权限或标记验证完成。</p><label for="session-tools">工具名（逗号或空白分隔）</label><input id="session-tools" type="text" autocomplete="off" placeholder="list_devices, list_roots, write_file"><button id="save-session-tools" type="button">记录工具观察</button></section>
-<section><h2>本机选项</h2><label class="check"><input id="startup" type="checkbox">登录 Windows 时启动原生 Agent</label><button id="save-startup" type="button" disabled>保存启动选项</button><p id="startup-note"></p></section>
+<section><h2>本机选项</h2><label class="check"><input id="startup" type="checkbox">登录 Windows 时启动原生 Agent</label><button id="save-startup" type="button" disabled>保存启动选项</button><p id="startup-note"></p><button id="quit" type="button">完全退出</button><p>退出会停止正在运行的终端任务；已发生的修改不会回滚。</p><p>升级或回退前请先完全退出，再运行目标版本的安装程序。目录、设备身份和权限会保留。</p></section>
 </section><footer>目录授权、共享管理和终端启用均需明确确认。通用设备注册、配对码和断开身份操作尚不支持。</footer></main></body></html>
