@@ -1,0 +1,12 @@
+[package]
+name = "chat2local-operation-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chat2local-operation-core = { path = "../operation-core" }
+serde_json.workspace = true

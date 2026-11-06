@@ -2,7 +2,7 @@
 setlocal DisableDelayedExpansion
 cd /d "%~dp0"
 if exist "%~dp0runtime\node.exe" (
-  "%~dp0runtime\node.exe" "%~dp0scripts\launch.mjs"
+  "%~dp0runtime\node.exe" "%~dp0scripts\install-portable.mjs"
 ) else (
   where node.exe >nul 2>nul
   if errorlevel 1 (

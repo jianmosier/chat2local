@@ -1,3 +1,4 @@
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -31,9 +32,9 @@ test('complete account HTTP flow: signed OIDC login -> real local selection/jour
     return response;
   } });
   t.after(async () => { await app.close(); await fs.rm(base, { recursive: true, force: true }); });
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module','main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module','main'], external: ['cloudflare:workers', '*.wasm'] });
   const enrollmentKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'],
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'],
     kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } },
     bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey, ACCOUNT_CONNECTIONS: 'true', ACCOUNT_ENROLLMENT: 'true', TEST_RECOVERY_ORIGIN: app.origin,
       OIDC_ISSUER: idp, OIDC_CLIENT_ID: idpClient, OIDC_AUTHORIZATION_ENDPOINT: idp + '/authorize', OIDC_TOKEN_ENDPOINT: idp + '/token', OIDC_JWKS_URI: idp + '/keys' },

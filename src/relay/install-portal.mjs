@@ -1,6 +1,7 @@
 import { randomSecret, sha256 } from '../shared/protocol.mjs';
 import { exactFields, isAccountId, isDigest, checkedResource } from '../shared/connection-access.mjs';
 import { PrivateInstance } from './private-instance.mjs';
+import { registryTransaction } from './registry-transaction.mjs';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const prefix = 'install:v1:';
@@ -13,8 +14,8 @@ const validPassword = value => typeof value === 'string' && value.length >= 16 &
  * never a file token, device key, operator key or permission to change folders.
  */
 export class InstallPortal {
-  constructor(storage, resource, pepper, now = Date.now) {
-    this.storage = storage; this.resource = checkedResource(resource); this.pepper = pepper; this.now = now;
+  constructor(storage, resource, pepper, now = Date.now, runner) {
+    this.storage = storage; this.resource = checkedResource(resource); this.pepper = pepper; this.now = now; this.runner = runner;
     if (!isDigest(pepper)) throw fail('Instance operator credential is unavailable.', 503);
   }
   async keyed(value) {
@@ -35,14 +36,14 @@ export class InstallPortal {
     exactFields(input, ['password']);
     if (await this.storage.get(prefix + 'password')) throw fail('安装密码已经设置；此入口不会覆盖。', 409);
     const salt = randomSecret(), digest = await this.verifier(input.password, salt);
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'install.password.configure', { salt, digest }, async tx => {
       if (await tx.get(prefix + 'password')) throw fail('安装密码已经设置；没有覆盖。', 409);
       await tx.put(prefix + 'password', { salt, digest, epoch: randomSecret() });
       return { configured: true, fileAccessGranted: false };
-    });
+    }, { now: this.now });
   }
   async limited(bucket, limit, windowMs) {
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'install.rate.consume', { bucket, limit, windowMs }, async tx => {
       const key = prefix + 'rate:' + bucket;
       let rate = await tx.get(key);
       const entries = await tx.list({ prefix: prefix + 'rate:', limit: 129 });
@@ -51,7 +52,7 @@ export class InstallPortal {
       if (!rate || rate.until <= this.now()) rate = { count: 0, until: this.now() + windowMs };
       if (rate.count >= limit) throw fail('尝试过多，请稍后再试；没有更改现有连接。', 429);
       rate.count++; await tx.put(key, rate);
-    });
+    }, { now: this.now });
   }
   async login({ password, network }) {
     if (!isDigest(network)) throw fail('Login network identity unavailable.', 503);
@@ -61,14 +62,14 @@ export class InstallPortal {
     if (!config) throw fail('实例尚未设置安装密码。现有文件连接不受影响。', 503);
     if (!validPassword(password) || !equal(await this.verifier(password, config.salt), config.digest)) throw fail('安装密码不正确。', 401);
     const secret = randomSecret(), sessionHash = await sha256(secret);
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'install.session.create', { config, sessionHash }, async tx => {
       const current = await tx.get(prefix + 'password');
       if (current?.epoch !== config.epoch) throw fail('Installer login changed.', 401);
       const entries = await tx.list({ prefix: prefix + 'session:', limit: 65 });
       for (const [id, value] of entries) if (value.until <= this.now()) await tx.delete(id);
       if ([...entries.values()].filter(v => v.until > this.now()).length >= 64) throw fail('Too many installer sessions.', 429);
       await tx.put(prefix + 'session:' + sessionHash, { epoch: config.epoch, until: this.now() + 1800000 });
-    });
+    }, { now: this.now });
     return { session: secret };
   }
   async session(tx, secret) {
@@ -82,7 +83,7 @@ export class InstallPortal {
   async start(input) {
     exactFields(input, ['id','claimHash','browserHash','name']);
     if (!isAccountId(input.id) || !isDigest(input.claimHash) || !isDigest(input.browserHash) || typeof input.name !== 'string' || input.name.length > 128 || /[\x00-\x1f\x7f]/.test(input.name)) throw fail('Invalid installer request.');
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'install.ticket.create', { input }, async tx => {
       const key = prefix + 'ticket:' + input.id, previous = await tx.get(key);
       if (previous) {
         if (previous.claimHash !== input.claimHash || previous.browserHash !== input.browserHash || previous.name !== input.name || previous.until <= this.now()) throw fail('Installer request changed or expired.', 409);
@@ -93,7 +94,7 @@ export class InstallPortal {
       if ([...entries.values()].filter(v => v.until > this.now()).length >= 64) throw fail('Too many pending installers.', 429);
       const value = { ...input, until: this.now() + 600000, phase: 'pending', connectionId: null };
       await tx.put(key, value); return { id: value.id, until: value.until };
-    });
+    }, { now: this.now });
   }
   async ticket(tx, id, secret, type) {
     if (!isAccountId(id) || !isDigest(secret)) throw fail('Invalid installer proof.', 401);
@@ -102,52 +103,52 @@ export class InstallPortal {
     return value;
   }
   async invitation(value) {
-    const instance = new PrivateInstance(this.storage, this.resource, this.now);
+    const instance = new PrivateInstance(this.storage, this.resource, this.now, this.runner);
     const secret = await this.keyed(['install-invitation', value.id, value.connectionId]);
     return instance.createInvitation({ purpose: 'join', connectionId: value.connectionId, ttlSeconds: 600 }, { invitationId: value.id, secret });
   }
   async context({ id, browser, session }) {
-    const ticket = await this.storage.transaction(tx => this.ticket(tx, id, browser, 'browserHash'));
+    const ticket = await registryTransaction(this.storage, this.runner, 'install.context.ticket', { id, browser }, tx => this.ticket(tx, id, browser, 'browserHash'), { now: this.now });
     let authenticated = false;
-    try { await this.storage.transaction(tx => this.session(tx, session)); authenticated = true; } catch (error) { if (error.status !== 401) throw error; }
+    try { await registryTransaction(this.storage, this.runner, 'install.context.session', { session }, tx => this.session(tx, session), { now: this.now }); authenticated = true; } catch (error) { if (error.status !== 401) throw error; }
     const configured = await this.configured();
-    const connections = authenticated ? (await new PrivateInstance(this.storage, this.resource, this.now).connections()).connections.map(c => ({ connectionId: c.connectionId, name: c.clientName || 'MCP client', callbackOrigin: new URL(c.redirectUri).origin })) : [];
+    const connections = authenticated ? (await new PrivateInstance(this.storage, this.resource, this.now, this.runner).connections()).connections.map(c => ({ connectionId: c.connectionId, name: c.clientName || 'MCP client', callbackOrigin: new URL(c.redirectUri).origin })) : [];
     // Only the initiating browser sees the continuation, and only after the
     // native runner has imported it. No copy/paste pairing code is exposed.
     const invitation = ticket.phase === 'ready' && authenticated ? await this.invitation(ticket) : null;
     return { ...configured, authenticated, name: ticket.name, phase: ticket.phase, connections, ...(invitation ? { nextUrl: new URL(this.resource).origin + '/instance/invite#' + invitation.invitation } : {}) };
   }
   async authorize({ id, browser, session, connectionId }) {
-    const ticket = await this.storage.transaction(async tx => { await this.session(tx, session); return this.ticket(tx, id, browser, 'browserHash'); });
-    const connections = (await new PrivateInstance(this.storage, this.resource, this.now).connections()).connections;
+    const ticket = await registryTransaction(this.storage, this.runner, 'install.authorize.check', { id, browser, session }, async tx => { await this.session(tx, session); return this.ticket(tx, id, browser, 'browserHash'); }, { now: this.now });
+    const connections = (await new PrivateInstance(this.storage, this.resource, this.now, this.runner).connections()).connections;
     const selected = connectionId === null && connections.length === 1 ? connections[0] : connections.find(c => c.connectionId === connectionId);
     if (!selected) throw fail('请选择原插件连接；不会新建或猜测另一个连接。', 409);
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'install.authorize.pin', { id, browser, session, selectedConnectionId: selected.connectionId }, async tx => {
       await this.session(tx, session); const current = await this.ticket(tx, id, browser, 'browserHash');
       if (current.connectionId && current.connectionId !== selected.connectionId) throw fail('Installer target is already pinned.', 409);
       current.connectionId = selected.connectionId; await tx.put(prefix + 'ticket:' + id, current);
-    });
+    }, { now: this.now });
     // Idempotent create with a server-derived capability survives response loss.
     await this.invitation({ ...ticket, connectionId: selected.connectionId });
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'install.authorize.advance', { id, browser, session, selectedConnectionId: selected.connectionId }, async tx => {
       await this.session(tx, session); const current = await this.ticket(tx, id, browser, 'browserHash');
       if (current.connectionId !== selected.connectionId) throw fail('Installer connection changed.', 409);
       if (current.phase === 'pending') current.phase = 'authorized';
       await tx.put(prefix + 'ticket:' + id, current);
-    });
+    }, { now: this.now });
     return { authorized: true, foldersGranted: false };
   }
   async claim({ id, secret }) {
-    const ticket = await this.storage.transaction(tx => this.ticket(tx, id, secret, 'claimHash'));
+    const ticket = await registryTransaction(this.storage, this.runner, 'install.claim.ticket', { id, secret }, tx => this.ticket(tx, id, secret, 'claimHash'), { now: this.now });
     if (!['authorized','ready'].includes(ticket.phase)) return { waiting: true };
     const invite = await this.invitation(ticket);
     return { waiting: false, version: 1, purpose: 'join', inviteUrl: new URL(this.resource).origin + '/instance/invite#' + invite.invitation, expiresAt: invite.expiresAt };
   }
   async ready({ id, secret }) {
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'install.ticket.ready', { id, secret }, async tx => {
       const ticket = await this.ticket(tx, id, secret, 'claimHash');
       if (!['authorized','ready'].includes(ticket.phase)) throw fail('Installer has no approved connection.', 403);
       ticket.phase = 'ready'; await tx.put(prefix + 'ticket:' + id, ticket); return { ready: true, foldersGranted: false };
-    });
+    }, { now: this.now });
   }
 }

@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
-import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
+import { OAuthProvider, getOAuthApi } from '@cloudflare/workers-oauth-provider';
 import { Device, Registry, validDevice, validSecret, equalSecret } from './state.mjs';
 import { handleMcp, json, readLimited, sha256, randomSecret, VERSION, requiredScopes } from '../shared/protocol.mjs';
 import { installPage, oauthCallbackOrigin } from '../shared/setup.mjs';
@@ -58,7 +58,7 @@ class McpApi extends WorkerEntrypoint {
   }
 }
 
-const authHandler = {
+function createAuthHandler(oidcDecisionFactory, oidcTokenVerifierFactory) { return {
   async fetch(request, env) {
     const url = new URL(request.url); const origin = effectiveOrigin(request, env);
     if (url.pathname === '/healthz' && request.method === 'GET') return json({ ok: true, name: 'chat2local-relay', version: VERSION, deployment: 'self-hosted-preview', requestBudgetVersion: REQUEST_BUDGET_VERSION });
@@ -73,7 +73,7 @@ const authHandler = {
     if (installerAsset) return installerAsset;
     if (url.pathname === '/install' || url.pathname === '/install.js' || url.pathname.startsWith('/install/')) return installRoute(request, env, origin);
     if (url.pathname.startsWith('/instance/')) return instanceRoute(request, env, origin);
-    if (url.pathname.startsWith('/account/')) return accountRoute(request, env, origin);
+    if (url.pathname.startsWith('/account/')) return accountRoute(request, env, origin, { oidcDecisionFactory, oidcTokenVerifierFactory });
     if (url.pathname === '/authorize-status.js' && request.method === 'GET') return new Response(authorizeStatusScript, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
     if (url.pathname === '/authorize/device-status') {
       if (request.method !== 'GET' || request.headers.get('X-Chat2Local-Check') !== '1' || request.headers.get('Sec-Fetch-Site') === 'cross-site') return json({ error: 'Same-origin browser check required.' }, 403);
@@ -117,7 +117,7 @@ const authHandler = {
       const client = await env.OAUTH_PROVIDER.lookupClient(authRequest.clientId);
       if (!client) return json({ error: 'Unknown client.' }, 400);
       if (env.PRIVATE_INSTANCE === 'true') return instanceAuthorize(request, env, origin, authRequest, client);
-      if (env.ACCOUNT_CONNECTIONS === 'true') return accountAuthorize(request, env, origin, authRequest, client);
+      if (env.ACCOUNT_CONNECTIONS === 'true') return accountAuthorize(request, env, origin, authRequest, client, { oidcDecisionFactory, oidcTokenVerifierFactory });
       const csrf = randomSecret();
       const currentDevice = await browserIdentity(request, env, origin);
       const verifiedRoster = await browserRoster(request, env, origin);
@@ -170,10 +170,10 @@ const authHandler = {
     });
     return new Response(null, { status: 303, headers: { Location: redirectTo, 'Set-Cookie': 'c2l_csrf=; HttpOnly; SameSite=Lax; Path=/authorize; Max-Age=0' } });
   },
-};
+}; }
 
-function providerFor(origin) {
-  return new OAuthProvider({
+function providerOptions(origin, authHandler) {
+  return {
     apiRoute: '/mcp', apiHandler: McpApi, defaultHandler: authHandler,
     authorizeEndpoint: '/authorize', tokenEndpoint: '/oauth/token', clientRegistrationEndpoint: '/oauth/register',
     scopesSupported: AUTH_SCOPES, accessTokenTTL: 3600, refreshTokenTTL: 7 * 86400, clientRegistrationTTL: 90 * 86400,
@@ -182,9 +182,13 @@ function providerFor(origin) {
     resourceMetadata: { resource: `${origin}/mcp`, ...(origin.startsWith('https:') ? { authorization_servers: [origin] } : {}), scopes_supported: AUTH_SCOPES, resource_name: 'Chat2Local', bearer_methods_supported: ['header'] },
     // The provider validates token scope, but application props must also reflect scope narrowing.
     tokenExchangeCallback: options => ({ accessTokenProps: { ...options.props, scopes: options.requestedScope.filter(scope => SCOPES.includes(scope)) } }),
-  });
+  };
 }
-export default {
+function providerFor(origin, authHandler) { return new OAuthProvider(providerOptions(origin, authHandler)); }
+// Internal explicit-build seam; the ordinary export keeps the original provider.
+export function createRelayWorker({ authenticateBearer, providerDriver, oidcDecisionFactory, oidcTokenVerifierFactory } = {}) {
+  const authHandler = createAuthHandler(oidcDecisionFactory, oidcTokenVerifierFactory);
+  return {
   async fetch(request, env, ctx) {
     let response;
     try {
@@ -199,7 +203,28 @@ export default {
         const body = await readLimited(request, url.pathname === '/mcp' ? undefined : 16 * 1024);
         request = new Request(request, { body });
       }
-      response = await providerFor(origin).fetch(request, env, ctx);
+      if (providerDriver) response = await providerDriver.fetch(request, env, ctx, { origin, defaultHandler: authHandler, apiHandler: { fetch: (request, env, ctx) => new McpApi(ctx, env).fetch(request) } });
+      else if (authenticateBearer && request.method !== 'OPTIONS' && url.pathname.startsWith('/mcp')) {
+        const authenticated = await authenticateBearer(request, env, { resource: `${origin}/mcp`, scopes: AUTH_SCOPES });
+        if (authenticated.response) response = authenticated.response;
+        else {
+          ctx.props = authenticated.props;
+          if (!env.OAUTH_PROVIDER) env.OAUTH_PROVIDER = getOAuthApi(providerOptions(origin, authHandler), env);
+          response = await new McpApi(ctx, env).fetch(request);
+        }
+        // Same provider CORS behavior; exceptions still use the outer handler.
+        const sentOrigin = request.headers.get('Origin');
+        if (sentOrigin) {
+          response = new Response(response.body, response);
+          response.headers.set('Access-Control-Allow-Origin', sentOrigin);
+          response.headers.set('Access-Control-Allow-Methods', '*');
+          response.headers.set('Access-Control-Allow-Headers', 'Authorization, *');
+          const exposed = (response.headers.get('Access-Control-Expose-Headers') ?? '').split(',').map(name => name.trim()).filter(Boolean);
+          for (const name of ['WWW-Authenticate', 'Retry-After']) if (!exposed.some(value => value.toLowerCase() === name.toLowerCase())) exposed.push(name);
+          response.headers.set('Access-Control-Expose-Headers', exposed.join(', '));
+          response.headers.set('Access-Control-Max-Age', '86400');
+        }
+      } else response = await providerFor(origin, authHandler).fetch(request, env, ctx);
     } catch (error) {
       // Detailed diagnostics are restricted to synthetic loopback tests, never deployment.
       if (env.TEST_DIAGNOSTICS === 'true' && env.ALLOW_LOOPBACK === 'true' && ['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname)) console.error(error.stack);
@@ -213,4 +238,5 @@ export default {
     if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     return new Response(response.body, { status: response.status, headers });
   },
-};
+}; }
+export default createRelayWorker();

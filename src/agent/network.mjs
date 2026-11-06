@@ -125,7 +125,13 @@ export class NetworkManager {
     }
   }
   status() { return { ...this.state }; }
-  close() { this.closed = true; this.revision++; this.restoreTls?.(); this.restoreTls = undefined; this.tlsKey = undefined; this.restore?.(); this.restore = undefined; this.applied = ''; this.key = undefined; }
+  close() {
+    this.closed = true; this.revision++;
+    const restore = [this.restoreTls, this.restore]; this.restoreTls = undefined; this.restore = undefined;
+    this.tlsKey = undefined; this.applied = ''; this.key = undefined;
+    const errors = []; for (const release of restore) { try { release?.(); } catch (error) { errors.push(error); } }
+    if (errors.length) throw new AggregateError(errors, 'Network cleanup failed.');
+  }
 }
 
 /** Compatibility helper for subprocesses. It only inherits configured proxies;

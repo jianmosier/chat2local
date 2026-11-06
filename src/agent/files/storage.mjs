@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { MAX_FILE_BYTES } from '../../shared/protocol.mjs';
+import { acquireWriteGate } from './write-fence.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -38,15 +39,26 @@ export async function readTextSnapshot(target, mayCreate = false) {
 
 /** File commit mechanics. The service owns serialization and authorization context. */
 export class FileWriter {
-  constructor({ safePath, readSnapshot, policyRoot, audit, stateDir }) {
-    Object.assign(this, { safePath, readSnapshot, policyRoot, audit, stateDir });
+  constructor({ safePath, readSnapshot, policyRoot, audit, stateDir, writerBackend, writeAuthority }) {
+    Object.assign(this, { safePath, readSnapshot, policyRoot, audit, stateDir, writerBackend, writeAuthority });
   }
 
   async commit(operation) {
     const id = operation.operationId;
     const permission = operation.authorization === 'directory-direct' ? 'direct' : true;
-    let temporary;
+    let temporary, releaseGate, preserveGate = false;
     try {
+      releaseGate = await acquireWriteGate(this.stateDir);
+      if (this.writerBackend) {
+        const authority = JSON.stringify(this.writeAuthority(operation.rootId, permission));
+        if (permission === 'direct') await this.audit('direct-write-requested', { operationId: id, rootId: operation.rootId, path: operation.path });
+        const result = await this.writerBackend.invoke(operation, JSON.parse(authority), this.stateDir,
+          () => JSON.stringify(this.writeAuthority(operation.rootId, permission)) === authority);
+        operation.backupSaved = result.backupSaved;
+        operation.sha256 = result.sha256;
+        await this.completed(operation, permission);
+        return;
+      }
       const { target } = await this.safePath(operation.rootId, operation.path, { writing: permission, mayCreate: true });
       const snapshot = await this.readSnapshot(operation.rootId, operation.path, true);
       if (snapshot.sha256 !== operation.expectedHash) throw new Error('File changed after proposal; nothing was written.');
@@ -77,22 +89,33 @@ export class FileWriter {
         temporary = undefined;
       }
       operation.sha256 = hash(bytes);
-      operation.status = permission === 'direct' ? 'written' : 'approved';
-      try {
-        await this.audit('written', {
-          operationId: id, rootId: operation.rootId, path: operation.path,
-          sha256: operation.sha256, authorization: operation.authorization,
-        });
-      } catch {
-        operation.message = 'File was written, but the audit log could not be saved. Check local storage.';
-      }
+      await this.completed(operation, permission);
     } catch (error) {
-      operation.status = 'failed';
-      operation.message = error.code ? `Filesystem operation failed (${error.code}).` : error.message;
+      preserveGate = error.unknown === true;
+      operation.status = preserveGate ? 'unknown' : 'failed';
+      operation.message = preserveGate ? `Write outcome is unknown (${error.code || 'EUNKNOWN'}). Inspect local files before proceeding; do not retry or use an older release.`
+        : error.code ? `Filesystem operation failed (${error.code}).` : error.message;
     } finally {
       if (temporary) await fs.unlink(temporary).catch(() => {});
+      if (releaseGate && !preserveGate) {
+        try { await releaseGate(); }
+        catch {
+          if (!['written', 'approved'].includes(operation.status)) operation.status = 'unknown';
+          operation.message = 'Write storage is fenced. Inspect local files before proceeding; do not retry or use an older release.';
+        }
+      }
       delete operation.content;
       delete operation.before;
+    }
+  }
+
+  async completed(operation, permission) {
+    operation.status = permission === 'direct' ? 'written' : 'approved';
+    try {
+      await this.audit('written', { operationId: operation.operationId, rootId: operation.rootId, path: operation.path,
+        sha256: operation.sha256, authorization: operation.authorization });
+    } catch {
+      operation.message = 'File was written, but the audit log could not be saved. Check local storage.';
     }
   }
 }

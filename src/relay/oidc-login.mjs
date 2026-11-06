@@ -74,11 +74,23 @@ export async function verifyIdToken(token, jwks, { issuer, clientId, nonce, now 
 }
 
 export class OidcLogin {
-  constructor({ env, origin, records, request = fetch, now = Date.now }) { this.config = oidcConfiguration(env, origin); this.origin = origin; this.records = records; this.request = request; this.now = now; }
+  constructor({ env, origin, records, request = fetch.bind(globalThis), now = Date.now, decisionFactory, tokenVerifierFactory }) { this.config = oidcConfiguration(env, origin); this.origin = origin; this.records = records; this.request = request; this.now = now; this.decisionFactory = decisionFactory; this.tokenVerifierFactory = tokenVerifierFactory; }
+  #decisionCore() {
+    if (this.decisionFactory === undefined) return null;
+    try {
+      const core = this.decisionFactory();
+      if (!core || ['begin', 'callbackPre', 'callbackCookie', 'callbackAfterTake'].some(key => typeof core[key] !== 'function')) throw Error();
+      return core;
+    } catch { throw fail('OIDC decision core unavailable.', 503); }
+  }
   async begin(returnPath) {
+    const decision = this.#decisionCore();
     const target = typeof returnPath === 'string' ? new URL(returnPath, this.origin) : null;
-    const joining = target?.pathname === '/account/add' && [...target.searchParams.keys()].every(k => k === 'connection') && target.searchParams.getAll('connection').length <= 1 && (!target.searchParams.has('connection') || /^[a-f0-9]{32}$/.test(target.searchParams.get('connection')));
-    if (!target || returnPath.length > 8192 || !returnPath.startsWith('/') || target.origin !== this.origin || target.hash || !(returnPath.startsWith('/authorize?') || joining)) throw fail('Invalid sign-in continuation.', 400);
+    if (decision) decision.begin(returnPath, target, this.origin);
+    else {
+      const joining = target?.pathname === '/account/add' && [...target.searchParams.keys()].every(k => k === 'connection') && target.searchParams.getAll('connection').length <= 1 && (!target.searchParams.has('connection') || /^[a-f0-9]{32}$/.test(target.searchParams.get('connection')));
+      if (!target || returnPath.length > 8192 || !returnPath.startsWith('/') || target.origin !== this.origin || target.hash || !(returnPath.startsWith('/authorize?') || joining)) throw fail('Invalid sign-in continuation.', 400);
+    }
     const state = randomSecret(), browser = randomSecret(), nonce = randomSecret(), verifier = randomSecret();
     await this.records('put', 'login', state, { browserHash: await sha256(browser), nonce, verifier, returnPath }, 300);
     const query = new URLSearchParams({ client_id: this.config.clientId, redirect_uri: this.config.redirectUri, response_type: 'code', scope: 'openid profile', state, nonce, code_challenge: await oauth.calculatePKCECodeChallenge(verifier), code_challenge_method: 'S256' });
@@ -87,21 +99,35 @@ export class OidcLogin {
     return new Response(null, { status: 303, headers: { Location: authorizationUrl.href, 'Set-Cookie': cookieHeader('c2l_oidc_' + state.slice(0, 16), browser, this.origin, 300) } });
   }
   async callback(request) {
+    const decision = this.#decisionCore();
     const query = new URL(request.url).searchParams;
-    if (['state','code','error','iss'].some(k => query.getAll(k).length > 1)) throw fail('Duplicate identity callback fields.');
-    const state = query.get('state'); if (!/^[a-f0-9]{64}$/.test(state || '')) throw fail('Identity callback state is missing.');
+    if (decision) decision.callbackPre(query);
+    else {
+      if (['state','code','error','iss'].some(k => query.getAll(k).length > 1)) throw fail('Duplicate identity callback fields.');
+      if (!/^[a-f0-9]{64}$/.test(query.get('state') || '')) throw fail('Identity callback state is missing.');
+    }
+    const state = query.get('state');
     const cookie = identityCookie(request, 'c2l_oidc_' + state.slice(0, 16));
-    if (!cookie) throw fail('This sign-in belongs to another browser or has expired.');
+    if (decision) decision.callbackCookie(cookie);
+    else if (!cookie) throw fail('This sign-in belongs to another browser or has expired.');
     const pending = await this.records('take', 'login', state, { browserHash: await sha256(cookie) });
-    if (query.has('error') || !query.get('code') || query.get('code').length > 4096 || (query.has('iss') && query.get('iss') !== this.config.issuer)) throw fail('Identity provider did not complete this sign-in.');
-    const body = { grant_type: 'authorization_code', client_id: this.config.clientId, redirect_uri: this.config.redirectUri, code: query.get('code'), code_verifier: pending.verifier, ...(this.config.clientSecret ? { client_secret: this.config.clientSecret } : {}) };
+    const code = decision ? decision.callbackAfterTake(query, this.config.issuer) : query.get('code');
+    if (!decision && (query.has('error') || !code || code.length > 4096 || (query.has('iss') && query.get('iss') !== this.config.issuer))) throw fail('Identity provider did not complete this sign-in.');
+    const body = { grant_type: 'authorization_code', client_id: this.config.clientId, redirect_uri: this.config.redirectUri, code, code_verifier: pending.verifier, ...(this.config.clientSecret ? { client_secret: this.config.clientSecret } : {}) };
     const response = await this.request(this.config.tokenEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body), redirect: 'manual', signal: AbortSignal.timeout(12000) });
     if (!response.ok) throw fail('Identity token exchange failed. Restart sign-in; no connection was authorized.');
     const tokens = JSON.parse(await readLimited(response, 64 * 1024));
     const keyResponse = await this.request(this.config.jwksUri, { redirect: 'manual', signal: AbortSignal.timeout(12000) });
     if (!keyResponse.ok) throw fail('Identity signing keys are unavailable.');
-    const jwks = JSON.parse(await readLimited(keyResponse, 64 * 1024));
-    const claims = await verifyIdToken(tokens.id_token, jwks, { ...this.config, nonce: pending.nonce, now: this.now(), accessToken: tokens.access_token });
+    const jwksText = await readLimited(keyResponse, 64 * 1024);
+    const jwks = JSON.parse(jwksText);
+    const token = tokens.id_token, options = { ...this.config, nonce: pending.nonce, now: this.now(), accessToken: tokens.access_token };
+    let verifier;
+    if (this.tokenVerifierFactory !== undefined) {
+      try { verifier = this.tokenVerifierFactory(); if (!verifier || typeof verifier.verify !== 'function') throw Error(); }
+      catch { throw fail('OIDC token core unavailable.', 503); }
+    }
+    const claims = verifier ? await verifier.verify(token, jwksText, options) : await verifyIdToken(token, jwks, options);
     const secret = randomSecret();
     // A bounded, revocable application session after verified login; NOT a claim
     // that the upstream ID/access token lasts 12h or is refreshed silently.

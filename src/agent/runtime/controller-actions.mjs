@@ -12,7 +12,7 @@ import { handleMcp, relayOrigin } from '../../shared/protocol.mjs';
 
 /** Local controller commands. The HTTP layer authenticates and schedules them. */
 export function createControllerActions({
-  state, store, options, entryFile, demoDir, files, setup, picker, bridge, network,
+  state, store, options, entryFile, demoDir, files, setup, picker, bridge, network, lifecycle,
   instanceOnboarding, readiness, existingRoot, connectionState, changePolicy, closeController,
 }) {
   const saveConfig = next => state.saveConfig(next);
@@ -122,7 +122,8 @@ export function createControllerActions({
         fields(value, ['id']);
         identifier(value.id);
         if (!(state.config.accountRoots || []).some(root => root.id === value.id)) throw failure(404, 'Account folder is not shared.');
-        await changePolicy({ ...state.config, accountRoots: state.config.accountRoots.filter(root => root.id !== value.id) });
+        const next = { ...state.config, accountRoots: state.config.accountRoots.filter(root => root.id !== value.id) };
+        await (lifecycle.fault ? state.restrictPolicy(next, files) : changePolicy(next));
         return { ok: true, localAccessRevoked: true, cloudMembershipRemoved: false };
       }
       case 'root/remove': {
@@ -130,14 +131,16 @@ export function createControllerActions({
         identifier(value.id);
         const remaining = state.config.roots.filter(root => root.id !== value.id);
         if (!remaining.length) setup.cancel();
-        await changePolicy({ ...state.config, roots: remaining });
+        const next = { ...state.config, roots: remaining };
+        await (lifecycle.fault ? state.restrictPolicy(next, files) : changePolicy(next));
         return { ok: true };
       }
       case 'pause': {
         fields(value, ['paused']);
         boolean(value.paused);
-        if (value.paused) { state.selectionRevision++; picker.cancel(); setup.cancel(); }
-        await changePolicy({ ...state.config, paused: value.paused });
+        if (value.paused) { if (lifecycle.healthy) lifecycle.run({ op: 'invalidateSelection' }); picker.cancel(); setup.cancel(); }
+        const next = { ...state.config, paused: value.paused };
+        await (lifecycle.fault ? state.restrictPolicy(next, files) : changePolicy(next));
         return { paused: state.config.paused };
       }
       case 'approve':
@@ -168,22 +171,24 @@ export function createControllerActions({
           content: `${snapshot.content}\n本次修改经由 MCP 提议，只有在本机确认后才会保存。\n` });
       }
       case 'network/set': {
+        lifecycle.permit();
         const selected = networkSettings(value);
         setup.cancel(); bridge.stop(); files.cancelPending('Network settings changed locally.');
         await saveConfig({ ...state.config, network: selected });
         const relay = state.secrets.identity?.origin || state.config.relay;
         if (relay) {
-          await network.prepare(relay, true);
+          lifecycle.permit(); await lifecycle.wait(network.prepare(relay, true)); lifecycle.permit();
           if (state.secrets.identity) bridge.start(state.secrets.identity);
         } else { bridge.start(undefined); }
         return { ok: true, settings: selected, network: network.status() };
       }
       case 'network/check': {
+        lifecycle.permit();
         fields(value, ['origin']);
         const relay = relayOrigin(state.secrets.identity?.origin || state.config.relay || value.origin, options.allowLocalRelay === true);
-        await network.prepare(relay, true);
+        await lifecycle.wait(network.prepare(relay, true)); lifecycle.permit();
         try {
-          const response = await fetch(`${relay}/healthz`, { redirect: 'error', signal: AbortSignal.timeout(10_000) });
+          const response = await lifecycle.wait(fetch(`${relay}/healthz`, { redirect: 'error', signal: AbortSignal.any([lifecycle.signal, AbortSignal.timeout(10_000)]) }));
           const healthy = response.ok && (await response.json()).name === 'chat2local-relay';
           return { ok: healthy, network: network.status(), websiteClientVerified: false,
             message: healthy ? '中继网络可达；这不代表已完成 ChatGPT 官网授权。' : '入口响应不匹配，请核对中继地址。' };
@@ -193,28 +198,31 @@ export function createControllerActions({
         }
       }
       case 'enroll': {
+        lifecycle.permit();
         fields(value, ['origin', 'enrollmentToken']);
         if (typeof value.origin !== 'string' || value.origin.length > 2048
           || typeof value.enrollmentToken !== 'string' || value.enrollmentToken.length > 512) throw failure(400, 'Invalid relay settings.');
         if (state.secrets.identity) throw failure(409, 'Disconnect the existing relay before registering a different one.');
         setup.cancel();
         const identity = await bridge.enroll(value.origin, value.enrollmentToken);
+        lifecycle.permit();
         await state.saveSecrets({ identity });
+        lifecycle.permit();
         await saveConfig({ ...state.config, relay: identity.origin });
+        lifecycle.permit();
         bridge.start(identity);
         return { ok: true };
       }
       case 'disconnect': {
         fields(value, []);
         const identity = state.secrets.identity;
-        state.selectionRevision++; picker.cancel(); setup.cancel();
+        if (lifecycle.healthy) lifecycle.run({ op: 'invalidateSelection' }); picker.cancel(); setup.cancel();
         bridge.stop(); bridge.identity = undefined; state.lastRemoteCallAt = null; files.cancelPending('Disconnected locally.');
         // Stop in memory before persistence or a possibly unavailable cloud call.
         state.config = { ...state.config, paused: true, relay: '', remoteUseConfirmed: false };
         delete state.config.connectionGuide;
         state.secrets = {};
-        await store.saveSecrets(state.secrets);
-        await store.saveConfig(state.config);
+        await state.persistDisconnect();
         try { return { ok: true, ...await bridge.revokeIdentity(identity) }; }
         catch { return { ok: true, remoteRevoked: false, warning: '本机访问已停止，但云端撤销未确认。请同时在 AI 客户端移除此连接。' }; }
       }
@@ -226,6 +234,7 @@ export function createControllerActions({
         return { ok: true };
       }
       case 'startup': {
+        lifecycle.permit();
         fields(value, ['enabled']);
         boolean(value.enabled);
         await (options.setStartup ?? setStartup)(value.enabled, entryFile, store.directory);

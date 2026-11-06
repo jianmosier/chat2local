@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { SOCKET_LEASE_MS, startLease, socketIsLive, touchLease, retireSocket, failSocketPending } from '../src/relay/socket-lease.mjs';
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 
 function fakeSocket(saved = null) {
   return { readyState: 1, attachment: saved, closed: [],
@@ -55,7 +56,7 @@ test('a late old-socket close cancels only its own pending work and never replay
 test('actual Durable Object refuses a healthy duplicate but releases an expired authenticated socket', { timeout: 30000 }, async t => {
   // Expiry control exists ONLY in this generated test bundle, never in worker.mjs.
   const bundle = await build({ stdin: { resolveDir: process.cwd(), sourcefile: 'socket-lease-test-entry.mjs', contents: `
-    import { Device as ProductionDevice } from './src/relay/state.mjs';
+    import { Device as ProductionDevice } from ${JSON.stringify(await relayEntry())};
     export class TestDevice extends ProductionDevice {
       async fetch(request) {
         if (new URL(request.url).pathname === '/test-only-expire') {
@@ -69,8 +70,8 @@ test('actual Durable Object refuses a healthy duplicate but releases an expired 
       }
     }
     export default { fetch(request, env) { return env.DEVICES.get(env.DEVICES.idFromName('isolated-fixture')).fetch(request); } };
-  ` }, bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat'], host: '127.0.0.1', port: 0, durableObjects: { DEVICES: { className: 'TestDevice', useSQLite: true } } }));
+  ` }, bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat'], host: '127.0.0.1', port: 0, durableObjects: { DEVICES: { className: 'TestDevice', useSQLite: true } } }));
   t.after(() => mf.dispose()); await mf.ready;
   const key = randomBytes(32).toString('hex');
   const init = await mf.dispatchFetch('http://fixture/initialize', { method: 'POST', body: JSON.stringify({ deviceKey: key }) });

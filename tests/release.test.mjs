@@ -6,7 +6,8 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { releaseOptions, validateRepository, syncSnapshot, publicationCloneArgs } from '../scripts/release.mjs';
+import { releaseOptions, validateRepository, syncSnapshot, publicationCloneArgs, verifyPublishedTree, inputFingerprint } from '../scripts/release.mjs';
+import { rustSourceFiles, publicDocuments } from '../scripts/build-public.mjs';
 import { checkSource } from '../scripts/check-source.mjs';
 const execFileAsync = promisify(execFile);
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -70,9 +71,11 @@ test('publication clone preserves manifest bytes with inherited CRLF settings an
   await fs.writeFile(path.join(target,'README.md'),'changed after clone\n');
   await assert.rejects(() => checkSource(target,path.join(target,'SOURCE-SHA256.json')), /Existing source was modified: README.md/);
 });
-test('task preparation and retry never add publication arguments', { timeout: 30000 }, async t => {
+async function releaseTaskFixture(t) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-prepare-task-'));
-  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  // A terminal record is saved after the release child and log have closed;
+  // its detached supervisor can briefly retain this owned directory as cwd.
+  t.after(() => fs.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   await fs.mkdir(path.join(base, 'scripts'));
   await fs.mkdir(path.join(base, 'src/shared'), { recursive: true });
   await fs.mkdir(path.join(base, '.artifacts'));
@@ -81,7 +84,7 @@ test('task preparation and retry never add publication arguments', { timeout: 30
   const entry = path.join(base, 'scripts/release-task.mjs');
   const taskFile = path.join(base, '.artifacts/release-task-fixture/task.json');
   const progress = path.join(base, '.artifacts/release-task-fixture/progress.log');
-  const invoke = mode => execFileAsync(process.execPath, [entry, mode, 'fixture/chat2local'], { cwd: base, windowsHide: true, timeout: 5000 });
+  const invoke = (mode, ...args) => execFileAsync(process.execPath, [entry, mode, 'fixture/chat2local', ...args], { cwd: base, windowsHide: true, timeout: 5000 });
   const finished = async () => {
     for (let i = 0; i < 150; i++) {
       const task = JSON.parse(await fs.readFile(taskFile, 'utf8'));
@@ -90,6 +93,11 @@ test('task preparation and retry never add publication arguments', { timeout: 30
     }
     throw Error('Isolated task fixture did not complete.');
   };
+  return { base, taskFile, progress, invoke, finished };
+}
+
+test('task preparation and retry never add publication arguments', { timeout: 30000 }, async t => {
+  const { base, progress, invoke, finished } = await releaseTaskFixture(t);
   // The fixture executable only reports arguments; it cannot publish anything.
   await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 1;');
   await invoke('prepare');
@@ -102,9 +110,68 @@ test('task preparation and retry never add publication arguments', { timeout: 30
   assert.equal(task.exitCode, 0); assert.equal(task.timedOut, false);
   assert.equal((await fs.readFile(progress, 'utf8')).trim(), '[]');
 });
+
+test('background publication requires its recorded exact commit and never blindly retries a failure', { timeout: 30000 }, async t => {
+  const { base, taskFile, progress, invoke, finished } = await releaseTaskFixture(t);
+  for (const args of [[], ['--commit', 'not-a-sha'], ['--commit', 'A'.repeat(40)], ['--commit', 'a'.repeat(40), '--publish']]) {
+    await assert.rejects(invoke('start', ...args), /EXACT_REVIEWED_SHA/);
+    assert.deepEqual(await fs.readdir(path.join(base, '.artifacts')), [], 'Invalid input must not create a task or spawn a worker.');
+  }
+  await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 1;');
+  const commit = 'a'.repeat(40);
+  await invoke('start', '--commit', commit);
+  const task = await finished(); assert.equal(task.state, 'failed'); assert.equal(task.action, 'publish'); assert.equal(task.commit, commit);
+  assert.deepEqual(JSON.parse(await fs.readFile(progress, 'utf8')), ['--publish', '--repo', 'fixture/chat2local', '--commit', commit]);
+  const before = await fs.readFile(taskFile, 'utf8'), log = await fs.readFile(progress, 'utf8');
+  await assert.rejects(invoke('retry'), /Inspect GitHub.*no task was retried/);
+  await assert.rejects(invoke('retry', '--commit', 'b'.repeat(40)), /EXACT_REVIEWED_SHA/);
+  assert.equal(await fs.readFile(taskFile, 'utf8'), before); assert.equal(await fs.readFile(progress, 'utf8'), log);
+  await fs.writeFile(taskFile, JSON.stringify({ ...task, commit: undefined }));
+  const legacy = await fs.readFile(taskFile, 'utf8');
+  await assert.rejects(invoke('retry'), /Legacy publication task/);
+  await assert.rejects(invoke('worker'), /Task identity or action changed/);
+  assert.equal(await fs.readFile(taskFile, 'utf8'), legacy);
+  await fs.writeFile(taskFile, JSON.stringify({ ...task, state: 'starting', commit: undefined }));
+  await assert.rejects(invoke('worker'), /lacks an exact reviewed commit/);
+  assert.equal(await fs.readFile(progress, 'utf8'), log, 'Refused attempts must not invoke the publisher.');
+});
 test('release publication code pins commit, verifies downloaded assets and never force-pushes or clobbers', async () => {
   const source=await fs.readFile('scripts/release.mjs','utf8');
-  assert.match(source,/--target',commit/);assert.match(source,/--draft/);assert.match(source,/release','download/);
-  assert.match(source,/users\.noreply\.github\.com/);assert.match(source,/inputFingerprint/);
+  assert.match(source,/'--target', options.commit/);assert.match(source,/--draft/);assert.match(source,/'release', 'download'/);
+  assert.match(source,/verifyPublishedTree/);assert.match(source,/inputFingerprint/);
   assert.doesNotMatch(source,/'--force'|'--clobber'|'--mirror'/);
+  assert.doesNotMatch(source.slice(source.indexOf('export async function publishRelease')), /git\(\['push'|git\(\['add'|core\.hooksPath|commit\.gpgsign/);
+});
+
+test('release targets an exact reviewed remote tree and rejects stale, missing and unsafe blobs', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-release-tree-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await fs.writeFile(path.join(directory, 'README.md'), 'reviewed source');
+  await fs.writeFile(path.join(directory, 'SOURCE-SHA256.json'), JSON.stringify({ files: { 'README.md': hash('reviewed source') } }));
+  const tree = { truncated: false, tree: [] };
+  for (const name of ['README.md', 'SOURCE-SHA256.json']) {
+    const bytes = await fs.readFile(path.join(directory, name));
+    tree.tree.push({ path: name, type: 'blob', mode: '100644', sha: createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex') });
+  }
+  await verifyPublishedTree(tree, directory);
+  await assert.rejects(verifyPublishedTree({ ...tree, truncated: true }, directory), /inventory/);
+  await assert.rejects(verifyPublishedTree({ tree: tree.tree.slice(1) }, directory), /inventory/);
+  await assert.rejects(verifyPublishedTree({ tree: [{ ...tree.tree[0], mode: '120000' }, tree.tree[1]] }, directory), /unsafe/);
+  await assert.rejects(verifyPublishedTree({ tree: [...tree.tree, { type: 'commit', mode: '160000', path: 'extra', sha: 'a'.repeat(40) }] }, directory), /unsupported/);
+  await assert.rejects(verifyPublishedTree({ tree: [...tree.tree, { type: 'tree', mode: '040000', path: 'extra', sha: 'a'.repeat(40) }] }, directory), /unexpected/);
+  await fs.writeFile(path.join(directory, 'README.md'), 'changed');
+  await assert.rejects(verifyPublishedTree(tree, directory), /differs/);
+  assert.throws(() => releaseOptions(['--commit', 'main']), /exact reviewed/);
+});
+
+test('release freshness covers launchers and Rust inputs as well as application modules', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-release-input-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const fixed = ['package.json', 'package-lock.json', 'install.sh', 'install.ps1', 'start-chat2local.cmd', 'start-chat2local.sh', 'LICENSE', 'tsconfig.json', 'wrangler.jsonc', '.gitignore', ...publicDocuments, ...rustSourceFiles];
+  for (const name of new Set(fixed)) { await fs.mkdir(path.dirname(path.join(directory, name)), { recursive: true }); await fs.writeFile(path.join(directory, name), 'fixture'); }
+  for (const name of ['src', 'scripts', 'tests']) await fs.mkdir(path.join(directory, name), { recursive: true });
+  const original = await inputFingerprint(directory);
+  for (const name of ['start-chat2local.cmd', 'start-chat2local.sh', 'LICENSE', 'tsconfig.json', 'Cargo.toml', 'crates/agent-controller/src/native.rs']) {
+    await fs.writeFile(path.join(directory, name), 'changed');
+    assert.notEqual(await inputFingerprint(directory), original, name);
+    await fs.writeFile(path.join(directory, name), 'fixture');
+  }
 });

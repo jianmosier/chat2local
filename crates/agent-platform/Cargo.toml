@@ -1,0 +1,19 @@
+[package]
+name = "chat2local-agent-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-protocol.workspace = true
+chat2local-policy.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_System_IO", "Win32_System_Pipes", "Wdk_Storage_FileSystem"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_IO", "Win32_System_Ioctl"] }

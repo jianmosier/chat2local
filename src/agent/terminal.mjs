@@ -11,13 +11,13 @@ export { terminalEnvironment, terminalShell, terminalCwd } from './terminal/shel
 
 /** Terminal use cases: authorize, reserve once, run, query and cancel. */
 export class TerminalService {
-  constructor({ getConfig, getDevice, store, spawnProcess = spawn }) {
+  constructor({ getConfig, getDevice, store, spawnProcess = spawn, runnerFactory, journalFactory }) {
     Object.assign(this, { getConfig, getDevice, store, spawnProcess });
     this.closed = false;
     this.launchTail = Promise.resolve();
-    this.journal = new TerminalJobStore(store);
+    this.journal = new TerminalJobStore(store, journalFactory?.(store));
     this.jobs = this.journal.jobs;
-    this.runner = new TerminalProcessRunner({
+    this.runner = (runnerFactory ?? (options => new TerminalProcessRunner(options)))({
       journal: this.journal,
       authorize: (rootId, access) => this.authorize(rootId, access),
       spawnProcess: (...args) => this.spawnProcess(...args),
@@ -54,6 +54,7 @@ export class TerminalService {
   }
 
   async execute(args, access, root) {
+    this.journal.assertAvailable();
     if (typeof args.command !== 'string' || !args.command.trim() || args.command.includes('\0') || Buffer.byteLength(args.command) > 16384) {
       throw new Error('Command must be nonempty UTF-8 text, at most 16 KiB, without NUL.');
     }
@@ -70,6 +71,7 @@ export class TerminalService {
       return this.invoke('terminal_status', { rootId: args.rootId, requestId: args.requestId }, access);
     }
     this.journal.ensureCapacity();
+    this.runner.assertAvailable?.();
     await approveRoot(root.path, this.store.directory, true);
     const cwd = await terminalCwd(root.path, args.cwd || '.');
     this.authorize(args.rootId, access);
@@ -80,9 +82,12 @@ export class TerminalService {
       exitCode: null, signal: null, startedAt: new Date().toISOString(), outcomeKnown: false,
     };
     // Reserve before spawn, then recheck live permission after persistence.
-    await this.journal.reserve(record);
+    const reservation = await this.journal.reserve(record);
+    if (reservation.kind === 'existing') return this.invoke('terminal_status', { rootId: args.rootId, requestId: args.requestId }, access);
+    if (reservation.kind !== 'created') throw new Error('Terminal reservation outcome unknown; no command was started.');
     this.authorize(args.rootId, access);
-    return this.runner.start({ record, access, shell, cwd, timeoutMs });
+    this.journal.assertAvailable();
+    return this.runner.start({ record, access, shell, command: args.command, cwd, timeoutMs });
   }
 
   view(record) { return this.journal.view(record); }
@@ -102,6 +107,6 @@ export class TerminalService {
 
   async close() {
     this.closed = true;
-    await Promise.all([...this.jobs.values()].map(job => this.stop(job, 'cancelled')));
+    await this.runner.close();
   }
 }

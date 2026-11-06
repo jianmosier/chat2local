@@ -1,0 +1,9 @@
+[package]
+name = "chat2local-native-store-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-native-store = { path = "../native-store" }
+serde_json.workspace = true

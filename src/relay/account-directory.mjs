@@ -1,5 +1,6 @@
 import { randomSecret, sha256 } from '../shared/protocol.mjs';
 import { exactFields, checkedClient, checkedResource, checkedScopes, checkedShares, checkedReferenceGrant, isAccountId, isDigest } from '../shared/connection-access.mjs';
+import { registryTransaction } from './registry-transaction.mjs';
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const newId = () => crypto.randomUUID().replaceAll('-', '');
@@ -13,13 +14,14 @@ const receipt = intent => ({ version: 1, intentId: intent.id, accountId: intent.
  * JSON API or interpret public actor/device fields as authenticated identities.
  */
 export class AccountDirectory {
-  constructor(storage, { now = Date.now, verifyDeviceConsent, assertActorCurrent } = {}) {
-    this.storage = storage; this.now = now; this.verifyDeviceConsent = verifyDeviceConsent; this.assertActorCurrent = assertActorCurrent;
+  constructor(storage, { now = Date.now, verifyDeviceConsent, assertActorCurrent, runner, currentGuard } = {}) {
+    this.storage = storage; this.now = now; this.verifyDeviceConsent = verifyDeviceConsent; this.assertActorCurrent = assertActorCurrent; this.runner = runner; this.currentGuard = currentGuard;
   }
   async execute(command) {
     if (command?.action === 'resolve') {
       exactFields(command, ['action', 'grant']);
-      return this.storage.transaction(tx => this.resolve(tx, checkedReferenceGrant(command.grant)));
+      const grant = checkedReferenceGrant(command.grant);
+      return registryTransaction(this.storage, this.runner, 'account.resolve', { grant }, tx => this.resolve(tx, grant), { now: this.now });
     }
     exactFields(command, ['action', 'actor', 'input']);
     exactFields(command.actor, ['identityKey', 'sessionBinding']);
@@ -40,7 +42,8 @@ export class AccountDirectory {
       native = await this.verifyDeviceConsent({ action: command.action, proof: input.proof, intent: structuredClone(pending) });
       if (!native || native.intentId !== pending.id || native.deviceId !== pending.deviceId || native.deviceEpoch !== pending.deviceEpoch || native.snapshotDigest !== pending.snapshotDigest || native.phase !== (command.action === 'confirm' ? 'consented' : 'activated')) throw fail('Native receipt does not match this consent.', 403);
     }
-    return this.storage.transaction(async tx => {
+    if (this.runner && this.assertActorCurrent && !this.currentGuard) throw fail('Rust current authority guard is not configured.', 503);
+    return registryTransaction(this.storage, this.runner, 'account.execute', { command: { ...command, input }, native, guard: this.currentGuard || { kind: 'none' } }, async tx => {
       if (this.assertActorCurrent) await this.assertActorCurrent(tx, command.actor);
       let account = await tx.get(key('identity', command.actor.identityKey));
       if (!account) {
@@ -110,7 +113,7 @@ export class AccountDirectory {
       if (!connection) await tx.put(key('connection-index', account.id), [...connectionIndex, current.id]);
       intent.phase = 'active'; await tx.put(key('intent', intent.id), intent);
       return { ...receipt(intent), grant: this.grant(current, intent.scopes) };
-    });
+    }, { now: this.now });
   }
   async prepare(tx, accountId, sessionBinding, input) {
     exactFields(input, ['intentId', 'connectionId', 'clientId', 'resource', 'deviceId', 'deviceEpoch', 'roots', 'scopes', 'policyDigest', 'requestDigest', 'allowScopeUpgrade']);

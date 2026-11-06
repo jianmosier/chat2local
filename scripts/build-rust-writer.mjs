@@ -1,0 +1,11 @@
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = fileURLToPath(new URL('..', import.meta.url));
+if (process.platform !== 'win32' || process.argv.length !== 2) throw Error('Windows only: node scripts/build-rust-writer.mjs');
+const result = spawnSync('cargo', ['build', '--locked', '--release', '-p', 'chat2local-writer'], { cwd: root, stdio: 'inherit', windowsHide: true, shell: false });
+if (result.error || result.status !== 0) throw Error('Rust writer build failed.');
+await fs.mkdir(path.join(root, 'runtime'), { recursive: true });
+await fs.copyFile(path.join(root, 'target', 'release', 'chat2local-writer.exe'), path.join(root, 'runtime', 'chat2local-writer.exe'));
+console.log('Development writer built; explicit CHAT2LOCAL_WRITE_BACKEND=rust required. Not included in portable releases.');

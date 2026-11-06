@@ -7,8 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { ShareRemoval, overlappingPaths } from '../src/agent/share-removal.mjs';
 import { terminalPermission } from '../src/shared/terminal-permission.mjs';
 import { annotateCoverage, directoryContains } from '../src/shared/share-tree.mjs';
-import { PrivateInstance } from '../src/relay/private-instance.mjs';
-import { AccountDirectory } from '../src/relay/account-directory.mjs';
+import { PrivateInstance } from './registry-fixture.mjs';
+import { AccountDirectory } from './registry-fixture.mjs';
 import { FileService } from '../src/agent/files.mjs';
 
 class Storage {

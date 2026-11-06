@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createPrivateKey, sign, randomBytes } from 'node:crypto';
 import { verifyIdToken, oidcConfiguration, OidcLogin } from '../src/relay/oidc-login.mjs';
-import { OnboardingStore } from '../src/relay/onboarding-store.mjs';
+import { OnboardingStore } from './registry-fixture.mjs';
 
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...keys.publicKey.export({ format: 'jwk' }), kid: 'test-key', alg: 'RS256', use: 'sig' };
@@ -61,4 +61,33 @@ test('real login implementation binds state to the initiating browser, consumes 
   const sessionCookie = completed.headers.getSetCookie().find(v => v.startsWith('__Host-c2l_account=')).split(';')[0];
   const session = await login.verifySession(new Request(origin, { headers: { Cookie: sessionCookie } })); assert.equal(session.subject, 'owner-123');
   assert.doesNotMatch(JSON.stringify([...storage.data]), /private-upstream|id_token|code_verifier/);
+});
+
+test('default fetch keeps its global receiver for token and signing-key requests', async () => {
+  const storage = new Records(), store = new OnboardingStore(storage, () => now), origin = 'https://relay.example.test';
+  const env = { ACCOUNT_CONNECTIONS: 'true', OIDC_ISSUER: issuer, OIDC_CLIENT_ID: clientId, OIDC_AUTHORIZATION_ENDPOINT: issuer + '/authorize', OIDC_TOKEN_ENDPOINT: issuer + '/token', OIDC_JWKS_URI: issuer + '/keys' };
+  const originalFetch = globalThis.fetch;
+  let loginNonce;
+  const requested = [];
+  globalThis.fetch = async function (url, options) {
+    if (this !== globalThis) throw new TypeError('Illegal invocation');
+    requested.push(url);
+    assert.equal(options.redirect, 'manual');
+    if (url === issuer + '/token') return Response.json({ id_token: signedIdentity(claims({ nonce: loginNonce })), access_token: 'access-token' });
+    assert.equal(url, issuer + '/keys');
+    return Response.json({ keys: [jwk] });
+  };
+  try {
+    const login = new OidcLogin({ env, origin, now: () => now, records: (action,kind,secret,value,ttl) => store.records({ action,kind,secret,value,ttl }) });
+    const started = await login.begin('/authorize?client_id=original-client');
+    const authorization = new URL(started.headers.get('Location'));
+    loginNonce = authorization.searchParams.get('nonce');
+    const callback = origin + '/account/callback?state=' + authorization.searchParams.get('state') + '&code=auth-code';
+    const cookie = started.headers.get('Set-Cookie').split(';')[0];
+    const completed = await login.callback(new Request(callback, { headers: { Cookie: cookie } }));
+    assert.equal(completed.status, 303);
+    assert.deepEqual(requested, [issuer + '/token', issuer + '/keys']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -24,10 +24,11 @@ export function powershell(script, input = '', timeout = 30_000, options = {}) {
   });
 }
 
-export async function atomicJson(file, value) {
+export async function atomicJson(file, value, guard = async () => {}) {
+  await guard();
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${randomUUID()}.tmp`;
-  try { await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' }); await fs.rename(temporary, file); }
+  try { await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' }); await guard(); await fs.rename(temporary, file); }
   finally { await fs.unlink(temporary).catch(() => {}); }
 }
 
@@ -48,9 +49,18 @@ async function unseal(envelope) {
 }
 
 export class Store {
-  constructor(directory = defaultStateDir()) { this.directory = directory; }
+  constructor(directory = defaultStateDir()) { this.directory = directory; this.publications = new Set(); }
+  trackPublication(work) {
+    const guard = this.publicationGuard;
+    const pending = Promise.resolve().then(async () => { await guard?.(); return work(guard); });
+    this.publications.add(pending);
+    pending.finally(() => this.publications.delete(pending)).catch(() => {});
+    return pending;
+  }
+  async drainPublications() { while (this.publications.size) await Promise.allSettled([...this.publications]); }
+
   async load() {
-    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    try { await fs.stat(this.directory); } catch (error) { if (error.code !== 'ENOENT') throw error; await this.publicationGuard?.(); await fs.mkdir(this.directory, { recursive: true, mode: 0o700 }); }
     let config = { version: 1, roots: [], paused: false, startup: false, relay: '' };
     try { config = JSON.parse(await fs.readFile(path.join(this.directory, 'settings.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw new Error('Settings are invalid; refusing to reset permissions silently.'); }
     if (config.version !== 1 || !Array.isArray(config.roots) || typeof config.paused !== 'boolean') throw new Error('Unsupported settings format.');
@@ -58,9 +68,9 @@ export class Store {
     try { secrets = await unseal(JSON.parse(await fs.readFile(path.join(this.directory, 'vault.json'), 'utf8'))); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     return { config, secrets };
   }
-  async saveConfig(config) { await atomicJson(path.join(this.directory, 'settings.json'), config); }
-  async saveSecrets(secrets) { await atomicJson(path.join(this.directory, 'vault.json'), await seal(secrets)); }
-  async saveSession(session) { await atomicJson(path.join(this.directory, 'session.json'), await seal(session)); }
+  saveConfig(config) { return this.trackPublication(guard => atomicJson(path.join(this.directory, 'settings.json'), config, guard)); }
+  saveSecrets(secrets) { return this.trackPublication(async guard => atomicJson(path.join(this.directory, 'vault.json'), await seal(secrets), guard)); }
+  saveSession(session) { return this.trackPublication(async guard => atomicJson(path.join(this.directory, 'session.json'), await seal(session), guard)); }
   async readSession() { return unseal(JSON.parse(await fs.readFile(path.join(this.directory, 'session.json'), 'utf8'))); }
   privateRecordPath(key) {
     if (key === 'management-sessions') return path.join(this.directory, 'management', 'sessions.json');
@@ -77,7 +87,9 @@ export class Store {
       return await unseal(JSON.parse(await fs.readFile(file, 'utf8')));
     } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
-  async savePrivateRecord(key, value) {
+  savePrivateRecord(key, value) { return this.trackPublication(guard => this.savePrivateGuarded(key, value, guard)); }
+  async savePrivateGuarded(key, value, guard) {
+    await guard?.();
     const file = this.privateRecordPath(key), directory = path.dirname(file);
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     if ((await fs.lstat(directory)).isSymbolicLink()) throw new Error('Private onboarding storage cannot be a link.');
@@ -86,17 +98,17 @@ export class Store {
       // A bounded history fails closed instead of silently expiring request IDs.
       if ((await fs.readdir(directory)).length >= 2048 && !await this.readPrivateRecord(key)) throw new Error('Terminal journal capacity reached; no new command was started.');
       if (Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) throw new Error('Terminal record is too large.');
-      await atomicJson(file, await seal(value)); return;
+      await atomicJson(file, await seal(value), guard); return;
     }
     const entries = await fs.readdir(directory, { withFileTypes: true });
     const owned = entries.filter(e => e.isFile() && /^onboarding-(flow|intent)-[a-f0-9]{32}\.json$/.test(e.name));
     if (owned.length >= 64) for (const entry of owned) {
       const target = path.join(directory, entry.name), info = await fs.lstat(target);
-      if (target !== file && info.isFile() && info.nlink === 1 && Date.now() - info.mtimeMs > 48 * 3600000) await fs.unlink(target);
+      if (target !== file && info.isFile() && info.nlink === 1 && Date.now() - info.mtimeMs > 48 * 3600000) { await guard?.(); await fs.unlink(target); }
     }
     if ((await fs.readdir(directory)).length >= 128 && !await this.readPrivateRecord(key)) throw new Error('Too many recent onboarding attempts.');
     if (JSON.stringify(value).length > 64 * 1024) throw new Error('Onboarding record is too large.');
-    await atomicJson(file, await seal(value));
+    await atomicJson(file, await seal(value), guard);
   }
 }
 
