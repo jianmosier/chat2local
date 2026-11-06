@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { packageEntries, writeTarGz } from './archive.mjs';
 import { VERSION } from '../src/shared/protocol.mjs';
+import { isPrivatePublicationPath } from './public-path-policy.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -115,6 +116,7 @@ export async function buildPublic(output = path.join(root, '.artifacts', 'public
   const privateValues = await privatePublicationValues();
   const bytesByName = new Map();
   for (const relative of files) {
+    if (isPrivatePublicationPath(relative)) throw Error('Private source path found in ' + relative + '; publication stopped.');
     const file = path.join(root, relative), stat = await fs.lstat(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 2 * 1024 * 1024) throw Error('Unsafe public source file: ' + relative);
     const bytes = await fs.readFile(file); const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);

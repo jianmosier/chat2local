@@ -71,9 +71,11 @@ test('publication clone preserves manifest bytes with inherited CRLF settings an
   await fs.writeFile(path.join(target,'README.md'),'changed after clone\n');
   await assert.rejects(() => checkSource(target,path.join(target,'SOURCE-SHA256.json')), /Existing source was modified: README.md/);
 });
-test('task preparation and retry never add publication arguments', { timeout: 30000 }, async t => {
+async function releaseTaskFixture(t) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-prepare-task-'));
-  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  // A terminal record is saved after the release child and log have closed;
+  // its detached supervisor can briefly retain this owned directory as cwd.
+  t.after(() => fs.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   await fs.mkdir(path.join(base, 'scripts'));
   await fs.mkdir(path.join(base, 'src/shared'), { recursive: true });
   await fs.mkdir(path.join(base, '.artifacts'));
@@ -82,7 +84,7 @@ test('task preparation and retry never add publication arguments', { timeout: 30
   const entry = path.join(base, 'scripts/release-task.mjs');
   const taskFile = path.join(base, '.artifacts/release-task-fixture/task.json');
   const progress = path.join(base, '.artifacts/release-task-fixture/progress.log');
-  const invoke = mode => execFileAsync(process.execPath, [entry, mode, 'fixture/chat2local'], { cwd: base, windowsHide: true, timeout: 5000 });
+  const invoke = (mode, ...args) => execFileAsync(process.execPath, [entry, mode, 'fixture/chat2local', ...args], { cwd: base, windowsHide: true, timeout: 5000 });
   const finished = async () => {
     for (let i = 0; i < 150; i++) {
       const task = JSON.parse(await fs.readFile(taskFile, 'utf8'));
@@ -91,6 +93,11 @@ test('task preparation and retry never add publication arguments', { timeout: 30
     }
     throw Error('Isolated task fixture did not complete.');
   };
+  return { base, taskFile, progress, invoke, finished };
+}
+
+test('task preparation and retry never add publication arguments', { timeout: 30000 }, async t => {
+  const { base, progress, invoke, finished } = await releaseTaskFixture(t);
   // The fixture executable only reports arguments; it cannot publish anything.
   await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 1;');
   await invoke('prepare');
@@ -102,6 +109,31 @@ test('task preparation and retry never add publication arguments', { timeout: 30
   assert.equal(task.state, 'completed'); assert.equal(task.action, 'prepare');
   assert.equal(task.exitCode, 0); assert.equal(task.timedOut, false);
   assert.equal((await fs.readFile(progress, 'utf8')).trim(), '[]');
+});
+
+test('background publication requires its recorded exact commit and never blindly retries a failure', { timeout: 30000 }, async t => {
+  const { base, taskFile, progress, invoke, finished } = await releaseTaskFixture(t);
+  for (const args of [[], ['--commit', 'not-a-sha'], ['--commit', 'A'.repeat(40)], ['--commit', 'a'.repeat(40), '--publish']]) {
+    await assert.rejects(invoke('start', ...args), /EXACT_REVIEWED_SHA/);
+    assert.deepEqual(await fs.readdir(path.join(base, '.artifacts')), [], 'Invalid input must not create a task or spawn a worker.');
+  }
+  await fs.writeFile(path.join(base, 'scripts/release.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 1;');
+  const commit = 'a'.repeat(40);
+  await invoke('start', '--commit', commit);
+  const task = await finished(); assert.equal(task.state, 'failed'); assert.equal(task.action, 'publish'); assert.equal(task.commit, commit);
+  assert.deepEqual(JSON.parse(await fs.readFile(progress, 'utf8')), ['--publish', '--repo', 'fixture/chat2local', '--commit', commit]);
+  const before = await fs.readFile(taskFile, 'utf8'), log = await fs.readFile(progress, 'utf8');
+  await assert.rejects(invoke('retry'), /Inspect GitHub.*no task was retried/);
+  await assert.rejects(invoke('retry', '--commit', 'b'.repeat(40)), /EXACT_REVIEWED_SHA/);
+  assert.equal(await fs.readFile(taskFile, 'utf8'), before); assert.equal(await fs.readFile(progress, 'utf8'), log);
+  await fs.writeFile(taskFile, JSON.stringify({ ...task, commit: undefined }));
+  const legacy = await fs.readFile(taskFile, 'utf8');
+  await assert.rejects(invoke('retry'), /Legacy publication task/);
+  await assert.rejects(invoke('worker'), /Task identity or action changed/);
+  assert.equal(await fs.readFile(taskFile, 'utf8'), legacy);
+  await fs.writeFile(taskFile, JSON.stringify({ ...task, state: 'starting', commit: undefined }));
+  await assert.rejects(invoke('worker'), /lacks an exact reviewed commit/);
+  assert.equal(await fs.readFile(progress, 'utf8'), log, 'Refused attempts must not invoke the publisher.');
 });
 test('release publication code pins commit, verifies downloaded assets and never force-pushes or clobbers', async () => {
   const source=await fs.readFile('scripts/release.mjs','utf8');

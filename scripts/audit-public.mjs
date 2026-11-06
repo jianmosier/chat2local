@@ -2,13 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { inspectPublicText, privatePublicationValues } from './build-public.mjs';
+import { isPrivatePublicationPath } from './public-path-policy.mjs';
 
 // Read-only audit. Reports locations/categories, never matching secret contents.
-const forbidden = /(?:^|\/)(?:\.artifacts|\.wrangler|codex|\.ssh|\.env(?:\.[^/]*)?|wrangler\.local\.jsonc|vault\.json|session\.json|settings\.json|audit\.jsonl|HANDOFF\.md)(?:\/|$)/;
 const runtime = /(?:^|\/)runtime\/(?:node|node\.exe)$/;
 const limit = 2 * 1024 * 1024;
 export function inspectAuditEntry(name, bytes, privateValues = []) {
-  if (forbidden.test(name)) return { location: name, category: 'private-file' };
+  if (isPrivatePublicationPath(name)) return { location: name, category: 'private-file' };
   if (bytes.length > limit) return { location: name, category: 'oversized-unscanned' };
   let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
@@ -25,7 +25,7 @@ export async function auditTree(directory, privateValues = []) {
       if (name === '.git') continue; // Git objects require the separate --git audit.
       const file = path.join(folder, item.name), stat = await fs.lstat(file);
       if (stat.isSymbolicLink() || (stat.isFile() && stat.nlink !== 1)) { result.findings.push({ location: name, category: 'unsafe-link' }); continue; }
-      if (forbidden.test(name)) { result.findings.push({ location: name, category: 'private-file' }); continue; }
+      if (isPrivatePublicationPath(name)) { result.findings.push({ location: name, category: 'private-file' }); continue; }
       if (stat.isDirectory()) { await visit(file, name + '/'); continue; }
       if (!stat.isFile()) { result.findings.push({ location: name, category: 'unsupported-entry' }); continue; }
       result.files++;
@@ -56,7 +56,7 @@ export function auditGit(directory, privateValues = []) {
     if (git(['cat-file', '-t', sha]).toString().trim() !== 'blob') continue;
     result.blobs++;
     const location = sha + ':' + name;
-    if (forbidden.test(name)) { result.findings.push({ location, category: 'private-file' }); continue; }
+    if (isPrivatePublicationPath(name)) { result.findings.push({ location, category: 'private-file' }); continue; }
     if (Number(git(['cat-file', '-s', sha]).toString().trim()) > limit) { result.findings.push({ location, category: 'oversized-unscanned' }); continue; }
     const entry = inspectAuditEntry(name, git(['cat-file', 'blob', sha]), privateValues);
     if (entry) result.findings.push({ ...entry, location });

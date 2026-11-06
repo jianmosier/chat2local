@@ -21,14 +21,15 @@
     if (busy) return;
     busy = true; say(''); el('controls').setAttribute('aria-busy', 'true');
     for (const button of el('controls').querySelectorAll('button')) button.disabled = true;
-    try { await work(); await refresh(); } catch (error) { try { if (token) await refresh(); } catch {} say(error.message + '。请核对当前状态；未自动重复提交。'); } finally { busy = false; el('controls').setAttribute('aria-busy', 'false'); for (const button of el('controls').querySelectorAll('button')) button.disabled = false; el('save-startup').disabled = !state?.startupAvailable; }
+    try { await work(); await refresh(); } catch (error) { try { if (token) await refresh(); } catch {} say(error.message + '。请核对当前状态；未自动重复提交。'); } finally { busy = false; el('controls').setAttribute('aria-busy', 'false'); for (const button of el('controls').querySelectorAll('button')) button.disabled = false; el('pause').disabled = Boolean(state?.nativeFault); el('save-startup').disabled = !state?.startupAvailable; }
   }
   function button(text, handler) { const b = document.createElement('button'); b.type = 'button'; b.textContent = text; b.disabled = busy; b.addEventListener('click', () => action(handler)); return b; }
   function modes(selected) { const select = document.createElement('select'); for (const [value, label] of [['read-only', '只读'], ['review', '逐次审批'], ['direct', '直接读写']]) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); } select.value = selected; select.setAttribute('aria-label', '目录权限'); return select; }
   async function refresh() {
     state = await api('status');
-    el('connection').textContent = state.paused ? '远程访问已暂停' : '远程连接：' + (bridgeLabels.get(state.bridge) || '待确认');
-    el('pause').textContent = state.paused ? '恢复远程访问' : '暂停远程访问';
+    el('connection').textContent = state.nativeFault ? '原生 Agent 已进入永久故障状态，请正常退出并重新启动。当前页面仍可限制或移除授权。' + (state.lifecycleWarning ? ' ' + state.lifecycleWarning : '') : state.paused ? '远程访问已暂停' : '远程连接：' + (bridgeLabels.get(state.bridge) || '待确认');
+    el('pause').textContent = state.nativeFault ? '远程访问已停止' : state.paused ? '恢复远程访问' : '暂停远程访问';
+    el('pause').disabled = busy || Boolean(state.nativeFault);
     el('startup').checked = Boolean(state.startup); el('save-startup').disabled = !state.startupAvailable;
     el('startup-note').textContent = state.startupAvailable ? '仅管理本原生程序的启动项，不改动已有 JS 启动项。' : '自定义状态目录或当前系统不支持原生启动项。';
     el('roots').replaceChildren();
@@ -50,7 +51,7 @@
     el('events').textContent = JSON.stringify(state.events || [], null, 2);
     try { guide = await api('guide'); el('guide-stage').textContent = guideLabels.get(guide.stage) || '待确认'; el('guide-prompt').textContent = (guide.stage === 'check-tools' ? guide.toolCheckPrompt : guide.verificationPrompt) || ''; el('cancel-guide').hidden = !guide.attemptId; } catch (e) { guide = null; el('guide-stage').textContent = e.message; }
   }
-  el('pause').onclick = () => action(() => api('pause', { paused: !state.paused }));
+  el('pause').onclick = () => { if (!state?.nativeFault) return action(() => api('pause', { paused: !state.paused })); };
   el('refresh').onclick = () => action(async () => {});
   el('pick-folder').onclick = () => action(async () => { const picked = await api('pick-folder', {}); if (picked.path) el('folder-path').value = picked.path; });
   el('browse-folder').onclick = () => action(async () => { const browse = await api('folder/browse', el('folder-path').value ? { path: el('folder-path').value } : {}); el('folder-path').value = browse.path; el('browse-results').replaceChildren(); for (const entry of browse.entries || []) el('browse-results').append(button(entry.name, async () => { el('folder-path').value = entry.path; })); });
@@ -73,7 +74,7 @@
       say('退出结果未确认。请重新打开管理入口核对状态；未自动重复发送退出请求。');
     }
   };
-  el('manage-shares').onclick = event => { event.preventDefault(); sessionStorage.setItem('chat2local-control', token); location.assign('/shares'); };
+  el('manage-shares').onclick = event => { event.preventDefault(); try { sessionStorage.setItem('chat2local-control', token); } catch { say('浏览器禁止本地会话存储。请允许会话存储后，通过本机启动入口重新打开管理页，再共享给应用。'); return; } location.assign('/shares'); };
   el('import-invitation').onclick = () => action(async () => { const result = await api('instance/import-invitation', { url: el('instance-invitation').value }); el('instance-invitation').value = ''; el('setup-message').textContent = '实例入口已保存：' + result.origin + '。尚未授权目录，请回到原实例页面继续。'; });
   el('inspect-setup').onclick = () => action(async () => { const result = await api('setup/inspect', {}); el('setup-message').textContent = result.message; const link = el('account-entry'); link.hidden = true; if (result.accountEntryUrl) { const url = new URL(result.accountEntryUrl); if (['https:', 'http:'].includes(url.protocol) && url.pathname === '/account/add' && !url.username && !url.password && !url.search && !url.hash) { link.href = url.href; link.hidden = false; } } });
   el('start-setup').onclick = () => action(async () => { const result = await api('setup/start', {}); el('setup-message').textContent = result.message; });

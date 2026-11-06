@@ -6,6 +6,43 @@ import { VERSION } from '../src/shared/protocol.mjs';
 import { SOURCE_REPOSITORY } from '../src/shared/distribution.mjs';
 import { verifyPackage } from './install-portable.mjs';
 
+const extractRelease = String.raw`
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$c=[Console]::In.ReadToEnd()|ConvertFrom-Json
+$z=[IO.Compression.ZipFile]::OpenRead($c.archive)
+try {
+  $maxFile=128MB; $maxTotal=256MB; [long]$declared=0
+  if($z.Entries.Count -gt 1001){throw 'Too many release files'}
+  foreach($e in $z.Entries){
+    $n=$e.FullName.Replace('\','/')
+    if(-not $n.StartsWith($c.folder+'/') -or $n -match '(^|/)(\.\.?)(/|$)|[:\x00-\x1f]' -or (($e.ExternalAttributes -shr 16) -band 61440) -eq 40960){throw 'Unsafe release entry'}
+    if($e.Length -gt $maxFile -or $e.Length -gt $maxTotal-$declared){throw 'Release expanded size exceeds limit'}
+    if($n.EndsWith('/') -and $e.Length -ne 0){throw 'Invalid release directory length'}
+    $declared+=$e.Length
+  }
+  $stageRoot=[IO.Path]::GetFullPath($c.stage)+[IO.Path]::DirectorySeparatorChar
+  $buffer=New-Object byte[] 65536; [long]$actual=0
+  foreach($e in $z.Entries){
+    $n=$e.FullName.Replace('\','/')
+    $target=[IO.Path]::GetFullPath([IO.Path]::Combine($c.stage,$n))
+    if(-not $target.StartsWith($stageRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe release target'}
+    if($n.EndsWith('/')){[IO.Directory]::CreateDirectory($target)|Out-Null;continue}
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))|Out-Null
+    $memberStream=$null; $fileStream=$null; [long]$written=0
+    try {
+      $memberStream=$e.Open()
+      $fileStream=[IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+      while(($count=$memberStream.Read($buffer,0,$buffer.Length)) -gt 0){
+        if($count -gt $e.Length-$written -or $count -gt $maxFile-$written -or $count -gt $maxTotal-$actual){throw 'Release entry byte length mismatch or expansion limit exceeded'}
+        $fileStream.Write($buffer,0,$count); $written+=$count; $actual+=$count
+      }
+      if($written -ne $e.Length){throw 'Release entry byte length mismatch'}
+    } finally {if($fileStream){$fileStream.Dispose()};if($memberStream){$memberStream.Dispose()}}
+  }
+} finally {$z.Dispose()}
+`;
+
 export function windowsReleaseIdentity(target = `${process.platform}-${process.arch}`) {
   if (target !== 'win32-x64') throw Error('This native release supports Windows x64 only; no architecture fallback is allowed.');
   const folder = 'Chat2Local-Windows-x64-' + VERSION.replaceAll('.', '-');
@@ -43,8 +80,9 @@ export async function downloadWindowsRelease(project) {
   const stage = await fs.mkdtemp(path.join(output, '.native-download-'));
   try {
     const archive = path.join(stage, 'release.zip'); await fs.writeFile(archive, bytes, { flag: 'wx' });
-    // Check every ZIP entry before extraction, including path and symlink mode.
-    await powershell("$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression.FileSystem;$c=[Console]::In.ReadToEnd()|ConvertFrom-Json;$z=[IO.Compression.ZipFile]::OpenRead($c.archive);try{if($z.Entries.Count -gt 1001){throw 'Too many files'};foreach($e in $z.Entries){$n=$e.FullName.Replace('\\','/');if(-not $n.StartsWith($c.folder+'/') -or $n -match '(^|/)(\\.\\.?)(/|$)|[:\\x00-\\x1f]' -or (($e.ExternalAttributes -shr 16) -band 61440) -eq 40960){throw 'Unsafe release entry'}}}finally{$z.Dispose()};Expand-Archive -LiteralPath $c.archive -DestinationPath $c.stage", JSON.stringify({ archive, folder: release.folder, stage }), 120000);
+    // Refuse oversized declarations before writing, then bound actual streamed
+    // bytes as well: malformed ZIP headers must not turn staging into a bomb.
+    await powershell(extractRelease, JSON.stringify({ archive, folder: release.folder, stage }), 120000);
     const unpacked = path.join(stage, release.folder), fresh = await verifyPackage(unpacked, { target: 'win32-x64' });
     if (fresh.manifest.runtimeKind !== 'rust-native') throw Error('Pinned Windows release is not native.');
     try { await fs.lstat(destination); }

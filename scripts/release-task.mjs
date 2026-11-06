@@ -9,8 +9,10 @@ import { VERSION } from '../src/shared/protocol.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const directory = path.join(root, '.artifacts', 'release-task-' + VERSION);
 const record = path.join(directory, 'task.json');
-const [mode, repository] = process.argv.slice(2);
-if (!['prepare','start','retry','status','worker'].includes(mode)) throw Error('Usage: release-task.mjs prepare|start OWNER/REPO | retry OWNER/REPO | status');
+const [mode, repository, ...extra] = process.argv.slice(2);
+const exactCommit = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+const commit = mode === 'start' && extra.length === 2 && extra[0] === '--commit' ? extra[1] : undefined;
+if (!['prepare','start','retry','status','worker'].includes(mode) || (mode === 'start' ? !exactCommit(commit) : extra.length !== 0)) throw Error('Usage: release-task.mjs prepare OWNER/REPO | start OWNER/REPO --commit EXACT_REVIEWED_SHA | retry OWNER/REPO | status');
 if (mode === 'status') {
   const result = JSON.parse(await fs.readFile(record, 'utf8'));
   let log = ''; try { log = await fs.readFile(path.join(directory,'progress.log'),'utf8'); } catch {}
@@ -21,21 +23,26 @@ if (mode === 'status') {
   if (mode === 'retry') {
     const previous = JSON.parse(await fs.readFile(record, 'utf8'));
     if (previous.state !== 'failed' || previous.repository !== repository || !['prepare','publish'].includes(previous.action)) throw Error('Only a confirmed failed task with the same explicit action may be retried.');
+    if (previous.action === 'publish') {
+      if (!exactCommit(previous.commit)) throw Error('Legacy publication task lacks an exact reviewed commit; no task was retried.');
+      throw Error('Inspect GitHub release, tag and asset state before continuing publication with the exact-commit publisher; no task was retried.');
+    }
     action = previous.action;
     await fs.copyFile(record, path.join(directory, 'attempt-' + Date.now() + '.json'));
   } else await fs.mkdir(directory);
-  await fs.writeFile(record, JSON.stringify({ version: VERSION, repository, action, state: 'starting', startedAt: new Date().toISOString() }), { flag:mode === 'retry' ? 'w' : 'wx' });
+  await fs.writeFile(record, JSON.stringify({ version: VERSION, repository, action, ...(action === 'publish' ? { commit } : {}), state: 'starting', startedAt: new Date().toISOString() }), { flag:mode === 'retry' ? 'w' : 'wx' });
   const worker = spawn(process.execPath, ['--use-env-proxy', fileURLToPath(import.meta.url), 'worker', repository], { cwd:root, detached:true, windowsHide:true, stdio:'ignore' });
   worker.unref(); console.log(JSON.stringify({ started:true, version:VERSION, workerPid:worker.pid }));
 } else {
   const task = JSON.parse(await fs.readFile(record,'utf8'));
   if (task.repository !== repository || task.state !== 'starting' || !['prepare','publish'].includes(task.action)) throw Error('Task identity or action changed.');
+  if (task.action === 'publish' && !exactCommit(task.commit)) throw Error('Publication task lacks an exact reviewed commit.');
   let log = '', writing = Promise.resolve();
   const save = (state, result = {}) => fs.writeFile(record, JSON.stringify({ ...task, state, ...result }, null, 2));
   await save('running');
   // Preparation never invokes GitHub or deployment operations. Retrying it
   // preserves the same action rather than silently promoting it to publication.
-  const args = ['--use-env-proxy','scripts/release.mjs', ...(task.action === 'publish' ? ['--publish','--repo',repository] : [])];
+  const args = ['--use-env-proxy','scripts/release.mjs', ...(task.action === 'publish' ? ['--publish','--repo',repository,'--commit',task.commit] : [])];
   const child = spawn(process.execPath, args, { cwd:root, windowsHide:true, stdio:['ignore','pipe','pipe'] });
   const collect = bytes => { log = (log + bytes.toString()).slice(-262144); const snapshot = log; writing = writing.then(() => fs.writeFile(path.join(directory,'progress.log'),snapshot)); };
   child.stdout.on('data',collect); child.stderr.on('data',collect);

@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { publicDocuments, inspectPublicText, buildPublic } from '../scripts/build-public.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { publicDocuments, rustSourceFiles, inspectPublicText, buildPublic } from '../scripts/build-public.mjs';
 import { auditTree, auditGit, inspectAuditEntry } from '../scripts/audit-public.mjs';
 import { VERSION } from '../src/shared/protocol.mjs';
 
@@ -17,6 +17,7 @@ test('public documentation links and versions match the exported contract', asyn
   for (const relative of files) {
     const text = await fs.readFile(path.join(root, relative), 'utf8');
     assert.ok(text.includes(VERSION), relative + ' lacks the current version');
+    assert.ok(text.includes(`/releases/download/v${VERSION}/chat2local-source-v${VERSION}.tar.gz`), 'First setup must identify the matching released source.');
     for (const heading of ['## 1. 首次配对', '## 2. 回连', '## 3. 多设备连接', '## 4. 管理']) assert.ok(text.includes(heading), heading);
     assert.equal((text.match(/^## /gm) || []).length, 4);
     assert.equal((text.match(/^```mermaid$/gm) || []).length, 1);
@@ -51,6 +52,39 @@ test('audit findings redact secrets and treat unscanned content as a failure', (
   assert.equal(JSON.stringify(finding).includes(secret), false);
   assert.equal(inspectAuditEntry('vault.json', Buffer.from('{}')).category, 'private-file');
   assert.equal(inspectAuditEntry('binary.bin', Buffer.from([255, 254])).category, 'non-text-unscanned');
+});
+
+test('public path policy refuses private backups, rotations and Windows casing without rejecting source names', () => {
+  const content = Buffer.from('synthetic private fixture content');
+  for (const name of ['tests/.env.local', 'tests/.ENV', 'tests/audit.jsonl.1', 'tests/vault.json.bak', 'tests/Settings.json', 'tests/SESSION.JSON~', 'src/WRANGLER.LOCAL.JSONC.backup', 'tests\\audit.jsonl.2026-01-01', 'src/.GIT/config', 'scripts/CODEX/state.json']) {
+    const finding = inspectAuditEntry(name, content);
+    assert.equal(finding?.category, 'private-file', name);
+    assert.equal(JSON.stringify(finding).includes(content.toString()), false);
+  }
+  for (const name of ['.gitignore', 'src/agent/settings.mjs', 'tests/settings-json.test.mjs', 'scripts/audit-public.mjs', 'src/codex-adapter.mjs']) assert.equal(inspectAuditEntry(name, Buffer.from('public fixture')), null, name);
+});
+
+test('export refuses nested private filenames before creating any public output', async t => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-export-path-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const fixture = path.join(base, 'project');
+  const fixed = ['.gitignore', 'LICENSE', 'package.json', 'package-lock.json', 'tsconfig.json', 'wrangler.jsonc', 'install.sh', 'install.ps1', 'start-chat2local.cmd', 'start-chat2local.sh', ...publicDocuments, ...rustSourceFiles];
+  for (const name of fixed) { const file = path.join(fixture, name); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, 'public fixture'); }
+  for (const name of ['scripts/build-public.mjs', 'scripts/archive.mjs', 'scripts/public-path-policy.mjs']) { const file = path.join(fixture, name); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.copyFile(path.join(root, name), file); }
+  await fs.mkdir(path.join(fixture, 'src', 'shared'), { recursive: true });
+  await fs.mkdir(path.join(fixture, 'tests'), { recursive: true });
+  await fs.writeFile(path.join(fixture, 'src', 'shared', 'protocol.mjs'), `export const VERSION = ${JSON.stringify(VERSION)};`);
+  await fs.writeFile(path.join(fixture, 'src', 'shared', 'setup.mjs'), "export const DEFAULT_RELAY = '';\n");
+  const isolated = await import(pathToFileURL(path.join(fixture, 'scripts', 'build-public.mjs')));
+  for (const [i, name] of ['tests/.env.local', 'src/audit.jsonl.1', 'scripts/Settings.json', 'tests/vault.json.bak'].entries()) {
+    const file = path.join(fixture, name), output = path.join(base, 'refused-' + i);
+    await fs.writeFile(file, 'synthetic private fixture content');
+    await assert.rejects(isolated.buildPublic(output), /Private source path/);
+    await assert.rejects(fs.lstat(output), { code: 'ENOENT' });
+    await fs.unlink(file);
+  }
+  const accepted = await isolated.buildPublic(path.join(base, 'accepted'));
+  assert.equal((await auditTree(accepted.directory)).passed, true, 'Safe public sources must remain exportable.');
 });
 test('public export includes current docs and passes its independent read-only tree audit', async t => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-public-audit-'));
