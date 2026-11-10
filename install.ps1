@@ -1,11 +1,11 @@
 param([string]$Instance)
 $ErrorActionPreference = 'Stop'
-$Version = '0.1.0-alpha.28'
+$Version = '0.1.0-alpha.30'
 $Repository = 'jianmosier/chat2local'
 $NodeVersion = 'v24.21.0'
 if ($env:OS -ne 'Windows_NT' -or [Environment]::OSVersion.Version.Major -lt 10) { throw 'Windows 10 or newer is required.' }
 $Architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-$Arch = switch ($Architecture.ToUpperInvariant()) { 'AMD64' { 'x64' }; 'ARM64' { 'arm64' }; default { throw 'Unsupported CPU architecture.' } }
+$Arch = switch ($Architecture.ToUpperInvariant()) { 'AMD64' { 'x64' }; 'ARM64' { throw 'This native release supports Windows x64 only. Existing installations were retained.' }; default { throw 'Unsupported CPU architecture.' } }
 $Base = Join-Path $env:LOCALAPPDATA 'Chat2Local\bootstrap'
 [IO.Directory]::CreateDirectory($Base) | Out-Null
 if ((Get-Item -LiteralPath $Base).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Bootstrap directory cannot be a link.' }

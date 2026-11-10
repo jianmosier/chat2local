@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { InstallPortal } from '../src/relay/install-portal.mjs';
-import { PrivateInstance } from '../src/relay/private-instance.mjs';
-import { AccountDirectory } from '../src/relay/account-directory.mjs';
+import { InstallPortal } from './registry-fixture.mjs';
+import { PrivateInstance } from './registry-fixture.mjs';
+import { AccountDirectory } from './registry-fixture.mjs';
 import { sha256 } from '../src/shared/protocol.mjs';
 import { renderInstanceInstaller } from '../scripts/build-install-release.mjs';
 import { VERSION } from '../src/shared/protocol.mjs';

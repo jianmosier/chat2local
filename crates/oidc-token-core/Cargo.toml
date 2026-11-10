@@ -1,0 +1,12 @@
+[package]
+name = "chat2local-oidc-token-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chat2local-js-value-compat = { path = "../js-value-compat" }
+rsa = { version = "=0.9.10", default-features = false, features = ["sha2"] }
+sha2 = { version = "=0.10.9", default-features = false, features = ["oid"] }

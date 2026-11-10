@@ -5,13 +5,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { chromium } from 'playwright-core';
 import { startController } from '../src/agent/main.mjs';
+import { fakeBridgeOptions, bridgeIdentity, until } from './lifecycle-fixtures.mjs';
 
 async function fixture(t) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-inline-browser-'));
   const root = path.join(base, 'existing'); const next = path.join(base, 'next');
   await fs.mkdir(root); await fs.mkdir(next); await fs.mkdir(path.join(base, '.ssh'));
   await fs.writeFile(path.join(base, 'not-visible.txt'), 'must not be listed or read');
-  const app = await startController({ port: 0, stateDir: path.join(base, 'private'), pickFolder: () => assert.fail('The ordinary UI must not invoke Windows GUI.') });
+  const app = await startController({ port: 0, stateDir: path.join(base, 'private'), bridgeOptions: fakeBridgeOptions(), pickFolder: () => assert.fail('The ordinary UI must not invoke Windows GUI.') });
   const local = (route, body, extra = {}) => fetch(`${app.origin}/api/${route}`, { method: 'POST', headers: { Origin: app.origin, 'X-Chat2Local-Token': app.token, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body), signal: AbortSignal.timeout(6000) });
   await local('root/add', { path: root, write: false });
   t.after(async () => { await app.close(); await fs.rm(base, { recursive: true, force: true }); });
@@ -35,7 +36,7 @@ test('directory browser is local-authenticated, names-only, bounded and never an
 });
 
 test('real browser adds a folder entirely on-page; cancel, permissions and existing connection are independent', { timeout: 45000 }, async t => {
-  const f = await fixture(t); await f.app.bridge.invoke('list_roots', {}); f.app.bridge.state = 'connected';
+  const f = await fixture(t); await f.app.bridge.invoke('list_roots', {}); f.app.bridge.start(bridgeIdentity); await until(() => f.app.bridge.state === 'connected');
   const browser = await chromium.launch({ channel: 'msedge', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1150, height: 1000 } });
   await page.goto(`${f.app.origin}/manage#${f.app.token}`); // Retained advanced directory manager.

@@ -1,0 +1,17 @@
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { argumentsFor, projectRoot } from './rust-relay-artifact.mjs';
+const { target, output }=argumentsFor(process.argv.slice(2));
+const run=(file,args,env=process.env)=>{const result=spawnSync(file,args,{cwd:projectRoot,env,stdio:'inherit',shell:false,windowsHide:true});if(result.error||result.status!==0)throw Error('Required Registry validation failed.');};
+run('cargo',['test','--locked','-p','chat2local-relay-registry-core','--target-dir',target]);
+run(process.execPath,['scripts/build-rust-relay.mjs','--target-dir',target,'--out-dir',output]);
+const defaults={...process.env};for(const key of ['CHAT2LOCAL_DEVICE_TEST_REQUIRED','CHAT2LOCAL_DEVICE_TEST_ARTIFACT_DIR','CHAT2LOCAL_REGISTRY_TEST_REQUIRED','CHAT2LOCAL_REGISTRY_TEST_ARTIFACT_DIR','CHAT2LOCAL_REGISTRY_TEST_DENY_LEGACY','CHAT2LOCAL_OAUTH_TEST_REQUIRED','CHAT2LOCAL_OAUTH_TEST_ARTIFACT_DIR','CHAT2LOCAL_OAUTH_TEST_DENY_LEGACY'])delete defaults[key];
+const aggregates=['account-connections','onboarding-session','private-instance','existing-connection','share-removal','install-portal'].map(name=>'tests/'+name+'.test.mjs');
+const http=['account-onboarding-http','private-instance-http','existing-connection-http','browser-recovery','pairing-sync','simple-setup'].map(name=>'tests/'+name+'.test.mjs');
+console.log('Default JS Registry aggregates and six HTTP fixtures (both Rust selection environments cleared)');
+run(process.execPath,['--test','--test-concurrency=1',...aggregates,...http],defaults);
+const selected={...defaults,CHAT2LOCAL_DEVICE_TEST_REQUIRED:'1',CHAT2LOCAL_DEVICE_TEST_ARTIFACT_DIR:output,CHAT2LOCAL_REGISTRY_TEST_REQUIRED:'1',CHAT2LOCAL_REGISTRY_TEST_ARTIFACT_DIR:output,CHAT2LOCAL_REGISTRY_TEST_COVERAGE_DIR:path.join(output,'evidence')};
+console.log('Original generated combined artifact: real WASM, actual workerd, all 37 transaction sites');
+run(process.execPath,['--test','--test-concurrency=1','tests/rust-registry.test.mjs',...aggregates],selected);
+console.log('Instrumented host negative control: all six HTTP fixtures reject any legacy Registry fallback');
+run(process.execPath,['--test','--test-concurrency=1',...http],{...selected,CHAT2LOCAL_REGISTRY_TEST_DENY_LEGACY:'1'});

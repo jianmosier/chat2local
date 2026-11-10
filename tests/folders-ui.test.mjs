@@ -249,7 +249,11 @@ test('one complete-share decision batches two displayed folders without auto-upg
   await openAndSelect(page);
   await page.getByRole('checkbox', { name: '加入待授权列表 New reference', exact: true }).check();
   assert.equal(await page.locator('#pending select').count(), 0);
+  assert.equal(await page.locator('#share-access-profile').inputValue(), 'files');
+  assert.match(await page.locator('#editor .consent').innerText(), /不新增终端权限/);
+  await page.locator('#share-access-profile').selectOption('project');
   assert.match(await page.locator('#editor .consent').innerText(), /目录外文件/);
+  await page.locator('#share-access-profile').selectOption('files');
   assert.equal(calls.filter(c => c.action === 'shares/prepare' || c.action === 'shares/confirm').length, 0);
   assert.equal(await page.getByRole('checkbox', { name: '加入待授权列表 Project Alpha', exact: true }).isDisabled(), true);
   await page.screenshot({ path: '.artifacts/ui-review/add-desktop.png', fullPage: true });
@@ -259,6 +263,7 @@ test('one complete-share decision batches two displayed folders without auto-upg
   await page.locator('#prepare').click(); await page.locator('#done').waitFor({ state: 'visible' });
   assert.equal(calls.filter(c => c.action === 'shares/confirm').length, 1);
   assert.deepEqual(calls.find(c => c.action === 'shares/prepare').input.folders, [{ path: '/projects/new', mode: 'direct' }, { path: '/projects/ref', mode: 'direct' }]);
+  assert.equal(calls.find(c => c.action === 'shares/prepare').input.accessProfile, undefined);
   await page.locator('#another').click();
   assert.equal(await page.locator('#folder-dialog').isVisible(), false);
   assert.equal(await page.locator('.shared-row').count(), 5);

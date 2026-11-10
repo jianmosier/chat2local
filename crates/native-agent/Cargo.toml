@@ -1,0 +1,9 @@
+[package]
+name = "chat2local-native-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-agent-controller = { path = "../agent-controller", default-features = false }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros"] }

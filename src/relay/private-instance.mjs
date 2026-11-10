@@ -1,6 +1,7 @@
 import { randomSecret, sha256 } from '../shared/protocol.mjs';
 import { AccountDirectory } from './account-directory.mjs';
 import { exactFields, checkedResource, checkedScopes, checkedClient, isAccountId, isDigest } from '../shared/connection-access.mjs';
+import { registryTransaction } from './registry-transaction.mjs';
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const key = (kind, id = '') => `instance:v1:${kind}:${id}`;
@@ -18,21 +19,21 @@ export function invitationParts(proof) {
  * instance-owner namespace, NOT a third-party account or browser identity.
  */
 export class PrivateInstance {
-  constructor(storage, resource, now = Date.now) { this.storage = storage; this.resource = checkedResource(resource); this.now = now; }
+  constructor(storage, resource, now = Date.now, runner) { this.storage = storage; this.resource = checkedResource(resource); this.now = now; this.runner = runner; }
   async owner() {
-    const saved = await this.storage.transaction(async tx => {
+    const saved = await registryTransaction(this.storage, this.runner, 'instance.owner.ensure', { resource: this.resource }, async tx => {
       let value = await tx.get(key('owner'));
       if (value && value.resource !== this.resource) throw fail('Private instance origin changed; explicit migration required.', 403);
       if (!value) { value = { resource: this.resource, identityKey: randomSecret(), sessionBinding: randomSecret() }; await tx.put(key('owner'), value); }
       return value;
-    });
+    }, { now: this.now });
     const actor = { identityKey: saved.identityKey, sessionBinding: saved.sessionBinding };
-    const { accountId } = await new AccountDirectory(this.storage).execute({ action: 'account', actor, input: {} });
+    const { accountId } = await new AccountDirectory(this.storage, { runner: this.runner }).execute({ action: 'account', actor, input: {} });
     return { actor, accountId };
   }
   async connections() {
     const owner = await this.owner();
-    const result = await new AccountDirectory(this.storage).execute({ action: 'connections', actor: owner.actor, input: { resource: this.resource } });
+    const result = await new AccountDirectory(this.storage, { runner: this.runner }).execute({ action: 'connections', actor: owner.actor, input: { resource: this.resource } });
     return { connections: await Promise.all(result.connections.map(async item => ({ ...item, ...(await this.storage.get(key('client', item.connectionId)) || {}) }))) };
   }
   /** Authenticated native management, limited to connections this exact device
@@ -47,7 +48,7 @@ export class PrivateInstance {
     if (action === 'start' && (!isAccountId(input.flowId) || !isAccountId(input.connectionId) || !isDigest(input.sessionSecret))) throw fail('Invalid folder-management intent.', 400);
     const owner = await this.owner();
     const sessionHash = action === 'start' ? await sha256(input.sessionSecret) : null;
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'instance.manage', { resource: this.resource, device, action, input, owner, sessionHash }, async tx => {
       const registration = await tx.get('device:' + device.deviceId);
       if (registration !== true && !(registration?.kind === 'private-instance' && registration.keyHash === device.keyHash)) throw fail('Device registration is unavailable.', 403);
       const connections = [];
@@ -77,14 +78,14 @@ export class PrivateInstance {
         await tx.put(key('flow', flow.id), flow);
       }
       return { flowId: flow.id, management: true, accountId: flow.accountId, displayName: new URL(this.resource).host, clientId: c.clientId, clientName: d.clientName, resource: this.resource, deviceId: device.deviceId, deviceEpoch: device.epoch, scopes: flow.scopes, requestDigest: await sha256(JSON.stringify(flow.authRequest)), connectionId: c.id, callbackOrigin: new URL(d.redirectUri).origin };
-    });
+    }, { now: this.now });
   }
   async removeShares({ device, input }) {
     exactFields(input, ['requestId', 'connectionId', 'rootIds', 'expectedRevision']);
     if (!isAccountId(input.requestId) || !isAccountId(input.connectionId) || !Number.isSafeInteger(input.expectedRevision) || !Array.isArray(input.rootIds) || !input.rootIds.length || input.rootIds.length > 100 || new Set(input.rootIds).size !== input.rootIds.length || input.rootIds.some(r => !/^[a-f0-9-]{36}$/.test(r))) throw fail('Invalid removal snapshot.', 400);
     const owner = await this.owner();
     const fingerprint = await sha256(JSON.stringify({ ...input, device }));
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'instance.shares.remove', { resource: this.resource, device, input, owner, fingerprint }, async tx => {
       const registration = await tx.get('device:' + device.deviceId);
       if (registration !== true && !(registration?.kind === 'private-instance' && registration.keyHash === device.keyHash)) throw fail('Device is no longer registered.', 403);
       const c = await tx.get('accounts:v3:connection:' + input.connectionId);
@@ -109,7 +110,7 @@ export class PrivateInstance {
       const result = { requestId: input.requestId, connectionId: c.id, rootIds: input.rootIds, removed: true, revision: c.revision, filesDeleted: false };
       await tx.put(key('removal', input.requestId), { fingerprint, result });
       return result;
-    });
+    }, { now: this.now });
   }
   async createInvitation(input, stable = null) {
     exactFields(input, ['purpose', 'connectionId', 'scopes', 'ttlSeconds', 'clientId']);
@@ -133,7 +134,7 @@ export class PrivateInstance {
     if (connection && clientId !== connection.clientId) throw fail('Invitation client does not match the connection.', 403);
     const invitationId = stable?.invitationId || id(), secret = stable?.secret || randomSecret();
     const value = { id: invitationId, secretHash: await sha256(secret), purpose: input.purpose, resource: this.resource, accountId, connectionId: connection?.id || null, connectionEpoch: connection?.epoch || null, clientId, descriptor, scopes, expiresAt: this.now() + ttl * 1000, revoked: false, claim: null };
-    const saved = await this.storage.transaction(async tx => {
+    const saved = await registryTransaction(this.storage, this.runner, 'instance.invitation.create', { resource: this.resource, invitationId, stable, value }, async tx => {
       const previous = await tx.get(key('invite', invitationId));
       if (previous) {
         if (!stable || previous.revoked || previous.expiresAt <= this.now() || previous.secretHash !== value.secretHash || previous.resource !== value.resource || previous.purpose !== value.purpose || previous.connectionId !== value.connectionId || previous.connectionEpoch !== value.connectionEpoch || previous.clientId !== value.clientId || JSON.stringify(previous.scopes) !== JSON.stringify(value.scopes)) throw fail('Installer invitation changed, expired or revoked.', 409);
@@ -143,17 +144,17 @@ export class PrivateInstance {
       for (const [k, item] of entries) if ((item.claim ? item.resumeUntil : item.expiresAt) <= this.now()) await tx.delete(k);
       if ([...entries.values()].filter(item => (item.claim ? item.resumeUntil : item.expiresAt) > this.now()).length >= 64) throw fail('Too many current invitations.', 429);
       await tx.put(key('invite', invitationId), value); return value;
-    });
+    }, { now: this.now });
     return { invitationId, invitation: invitationId + '.' + secret, purpose: saved.purpose, connectionId: saved.connectionId, expiresAt: saved.expiresAt };
   }
   async revokeInvitation({ invitationId }) {
     if (!isAccountId(invitationId)) throw fail('Invalid invitation identifier.', 400);
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'instance.invitation.revoke', { resource: this.resource, invitationId }, async tx => {
       const item = await tx.get(key('invite', invitationId));
       if (!item) throw fail('Invitation not found.', 404);
       item.revoked = true; await tx.put(key('invite', invitationId), item);
       return { revoked: true, activeSharesChanged: false };
-    });
+    }, { now: this.now });
   }
   async checkInvite(tx, invitationId, secretHash, flowId) {
     const item = await tx.get(key('invite', invitationId));
@@ -171,7 +172,7 @@ export class PrivateInstance {
     let pinned = null;
     if (invitation !== undefined) {
       const [invitationId, secret] = invitationParts(invitation), digest = await sha256(secret);
-      pinned = await this.storage.transaction(tx => this.checkInvite(tx, invitationId, digest, null));
+      pinned = await registryTransaction(this.storage, this.runner, 'instance.invitation.pin', { resource: this.resource, invitationId, digest }, tx => this.checkInvite(tx, invitationId, digest, null), { now: this.now });
       if (pinned.purpose !== 'join') throw fail('Use the supplied installer configuration for a first connection.', 400);
       authRequest = { clientId: pinned.clientId, scope: pinned.scopes, redirectUri: pinned.descriptor.redirectUri };
       clientName = pinned.descriptor.clientName;
@@ -181,13 +182,13 @@ export class PrivateInstance {
     const owner = await this.owner();
     const flowId = id(), bootstrap = randomSecret(), browser = randomSecret();
     const flow = { id: flowId, mode: pinned ? 'join' : 'oauth', authRequest, clientName: String(clientName || '请求应用').slice(0, 120), resource: this.resource, scopes, accountId: owner.accountId, actor: { ...owner.actor, sessionBinding: await sha256(browser) }, bootstrapHash: await sha256(bootstrap), browserHash: await sha256(browser), invitationId: pinned?.id || null, invitationHash: pinned?.secretHash || null, createdAt: this.now(), until: this.now() + 86400000, finishTaken: false };
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'instance.flow.create', { resource: this.resource, flowId, flow }, async tx => {
       const entries = await tx.list({ prefix: key('flow'), limit: 201 });
       const alive = item => (item.device ? item.until : item.createdAt + 300000) > this.now();
       for (const [k, item] of entries) if (!alive(item)) await tx.delete(k);
       if ([...entries.values()].filter(alive).length >= 200) throw fail('Too many pending connection requests.', 429);
       await tx.put(key('flow', flowId), flow);
-    });
+    }, { now: this.now });
     return { flowId, bootstrap, browser };
   }
   async claim({ flowId, bootstrap, invitation, deviceId, keyHash, sessionHash, registering = false }) {
@@ -195,7 +196,7 @@ export class PrivateInstance {
     const bootstrapHash = await sha256(bootstrap);
     let supplied;
     if (invitation !== undefined && invitation !== null) { const [id, secret] = invitationParts(invitation); supplied = { id, hash: await sha256(secret) }; }
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'instance.invitation.claim', { resource: this.resource, flowId, bootstrapHash, supplied, deviceId, keyHash, sessionHash, registering }, async tx => {
       const flow = await tx.get(key('flow', flowId));
       if (!flow || flow.bootstrapHash !== bootstrapHash || flow.until <= this.now() || (!flow.device && this.now() - flow.createdAt > 300000)) throw fail('This native connection request expired.', 401);
       const invitationId = flow.invitationId || supplied?.id, invitationHash = flow.invitationHash || supplied?.hash;
@@ -219,7 +220,7 @@ export class PrivateInstance {
       if (flow.device.deviceId !== deviceId || flow.device.keyHash !== keyHash || flow.device.sessionHash !== sessionHash) throw fail('Native device changed during setup.', 403);
       await tx.put(key('invite', invite.id), invite); await tx.put(key('flow', flow.id), flow);
       return { reserved: true };
-    });
+    }, { now: this.now });
   }
   /** Recovery authenticates an ALREADY enrolled computer, not a new enrollment.
    * Operator-enrolled legacy devices may explicitly authorize their retained local
@@ -228,7 +229,7 @@ export class PrivateInstance {
    */
   async claimExisting({ flowId, bootstrap, device, sessionHash }) {
     const bootstrapHash = await sha256(bootstrap);
-    return this.storage.transaction(async tx => {
+    return registryTransaction(this.storage, this.runner, 'instance.recovery.claim', { resource: this.resource, flowId, bootstrapHash, device, sessionHash }, async tx => {
       const flow = await tx.get(key('flow', flowId));
       if (!flow || flow.bootstrapHash !== bootstrapHash || flow.until <= this.now() || (!flow.device && this.now() - flow.createdAt > 300000)) throw fail('This native connection request expired.', 401);
       if (flow.mode !== 'oauth' || (flow.device && !flow.reuseExisting)) return false;
@@ -265,7 +266,7 @@ export class PrivateInstance {
       flow.device = { deviceId: device.deviceId, keyHash: device.keyHash, epoch: device.epoch, sessionHash };
       await tx.put(key('flow', flowId), flow);
       return true; // Still no active share or OAuth code before native confirmation.
-    });
+    }, { now: this.now });
   }
   async assertFlow(tx, flow) {
     const current = await tx.get(key('flow', flow.id));
@@ -298,16 +299,16 @@ export class PrivateInstance {
       const sessionHash = await sha256(input.sessionSecret);
       const reused = input.reuseExisting === true && await this.claimExisting({ flowId, bootstrap: secret, device, sessionHash });
       if (!reused) await this.claim({ flowId, bootstrap: secret, invitation, deviceId: device.deviceId, keyHash: device.keyHash, sessionHash });
-      return this.storage.transaction(async tx => {
+      return registryTransaction(this.storage, this.runner, 'instance.native.bindEpoch', { resource: this.resource, flowId, device }, async tx => {
         const flow = await tx.get(key('flow', flowId));
         if (flow.device.epoch && flow.device.epoch !== device.epoch) throw fail('Device epoch changed.', 403);
         flow.device.epoch = device.epoch; await tx.put(key('flow', flowId), flow);
         return { flowId, accountId: flow.accountId, displayName: new URL(this.resource).host, clientId: flow.authRequest.clientId, clientName: flow.clientName, resource: this.resource, deviceId: device.deviceId, deviceEpoch: device.epoch, scopes: flow.scopes, requestDigest: await sha256(JSON.stringify(flow.authRequest)), connectionId: flow.connectionId, callbackOrigin: new URL(flow.authRequest.redirectUri).origin, ...(flow.reuseExisting ? { reuseExisting: true, recoveryRoots: flow.recoveryRoots } : {}) };
-      });
+      }, { now: this.now });
     }
     const flow = await this.storage.get(key('flow', flowId));
     if (!flow || flow.device?.deviceId !== device.deviceId || flow.device?.keyHash !== device.keyHash || flow.device?.epoch !== device.epoch || flow.device?.sessionHash !== await sha256(secret)) throw fail('Pairing session does not match this computer.', 401);
-    const directory = new AccountDirectory(this.storage, { now: this.now, assertActorCurrent: tx => this.assertFlow(tx, flow), verifyDeviceConsent: async ({ action: step, proof, intent }) => {
+    const directory = new AccountDirectory(this.storage, { runner: this.runner, currentGuard: { kind: 'instanceFlow', resource: this.resource, flow }, now: this.now, assertActorCurrent: tx => this.assertFlow(tx, flow), verifyDeviceConsent: async ({ action: step, proof, intent }) => {
       if (step !== action || proof !== secret || intent.id !== flowId || input.snapshotDigest !== intent.snapshotDigest || intent.deviceId !== device.deviceId || intent.deviceEpoch !== device.epoch) return null;
       return { intentId: intent.id, snapshotDigest: intent.snapshotDigest, deviceId: device.deviceId, deviceEpoch: device.epoch, phase: action === 'confirm' ? 'consented' : 'activated' };
     } });
@@ -329,24 +330,24 @@ export class PrivateInstance {
     if (!isAccountId(flowId) || !isDigest(browser)) throw fail('Original browser continuation required.', 401);
     const flow = await this.storage.get(key('flow', flowId));
     if (!flow || flow.browserHash !== await sha256(browser) || flow.until <= this.now() || flow.finishTaken) throw fail('Original browser request expired or already used.', 401);
-    const directory = new AccountDirectory(this.storage, { now: this.now, assertActorCurrent: tx => this.assertFlow(tx, flow) });
+    const directory = new AccountDirectory(this.storage, { runner: this.runner, currentGuard: { kind: 'instanceFlow', resource: this.resource, flow }, now: this.now, assertActorCurrent: tx => this.assertFlow(tx, flow) });
     const intent = await directory.execute({ action: 'status', actor: flow.actor, input: { intentId: flowId } });
     if (intent.phase !== 'active') throw fail('The chosen folders have not been activated.');
     const connection = await this.storage.get('accounts:v3:connection:' + intent.connectionId);
     const grant = directory.grant(connection, flow.scopes); await directory.execute({ action: 'resolve', grant });
     if (flow.mode === 'join') return { joined: true, folderCount: intent.roots.length }; // NO token issuance; same original reference.
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'instance.finish.take', { resource: this.resource, flow, flowId }, async tx => {
       await this.assertFlow(tx, flow);
       const current = await tx.get(key('flow', flowId)); if (current.finishTaken) throw fail('OAuth continuation already consumed.');
       current.finishTaken = true; await tx.put(key('flow', flowId), current);
-    });
+    }, { now: this.now });
     const remember = randomSecret();
-    await this.storage.transaction(async tx => {
+    await registryTransaction(this.storage, this.runner, 'instance.remember.store', { resource: this.resource, remember, grant, redirectUri: flow.authRequest.redirectUri }, async tx => {
       const entries = await tx.list({ prefix: key('remember'), limit: 65 });
       for (const [k, value] of entries) if (value.until <= this.now()) await tx.delete(k);
       if ([...entries.values()].filter(value => value.until > this.now()).length >= 64) return;
       await tx.put(key('remember', await sha256(remember)), { grant, redirectUri: flow.authRequest.redirectUri, until: this.now() + 30 * 86400000 });
-    });
+    }, { now: this.now });
     return { authRequest: flow.authRequest, accountId: flow.accountId, grant, remember };
   }
   async remembered({ secret, authRequest }) {
@@ -357,7 +358,7 @@ export class PrivateInstance {
     if (scopes.some(s => !saved.grant.scopes.includes(s))) return null;
     const grant = { ...saved.grant, scopes };
     try {
-      const resolved = await new AccountDirectory(this.storage).execute({ action: 'resolve', grant });
+      const resolved = await new AccountDirectory(this.storage, { runner: this.runner }).execute({ action: 'resolve', grant });
       if (!resolved.devices.length) return null;
       return { accountId: grant.accountId, grant };
     } catch { return null; }

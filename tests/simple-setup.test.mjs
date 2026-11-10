@@ -1,3 +1,4 @@
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -71,9 +72,9 @@ test('simple home identifies an old relay explicitly rather than asking for code
 });
 
 test('single folder consent -> browser binding -> OAuth -> actual direct write and reviewed proposal', { timeout: 90000 }, async t => {
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
   const enrollmentKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', SELF_SERVICE_ENROLLMENT: 'true', SELF_SERVICE_DEVICE_LIMIT: '10', ENROLLMENT_KEY: enrollmentKey, CHATGPT_INSTALL_URL: installUrl } }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', SELF_SERVICE_ENROLLMENT: 'true', SELF_SERVICE_DEVICE_LIMIT: '10', ENROLLMENT_KEY: enrollmentKey, CHATGPT_INSTALL_URL: installUrl } }));
   const origin = (await mf.ready).origin;
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'c2l-simple-e2e-'));
   const folder = path.join(base, 'sample'); await fs.mkdir(folder); await fs.writeFile(path.join(folder, 'test.txt'), 'Before.');
@@ -87,7 +88,7 @@ test('single folder consent -> browser binding -> OAuth -> actual direct write a
   const local = (route, body) => fetch(`${app.origin}/api/${route}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Chat2Local-Token': app.token, Origin: app.origin, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   let identity; let authPage; let handoff; let tokens; let rootId;
   await t.test('self-service cannot be used until the operator enables and publishes it', async () => {
-    const closed = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey } }));
+    const closed = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey } }));
     try {
       const unavailableOrigin = (await closed.ready).origin;
       const info = await value(await fetch(`${unavailableOrigin}/setup-info`)); assert.equal(info.installUrl, null); assert.equal(info.selfService, false);

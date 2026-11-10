@@ -1,3 +1,4 @@
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -55,9 +56,9 @@ test('real browser: original OAuth page -> local confirmation -> browser binding
   const folder = path.join(base, 'sample'); await fs.mkdir(folder);
   const store = new Store(path.join(base, 'private'));
   const app = await startController({ port: 0, store, allowLocalRelay: true, networkOptions: { env: {}, systemProxy: async () => ({ proxy: '' }) }, openBrowser: async () => assert.fail('Recovery must navigate the same tab, not open a separate browser.') });
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
   const enrollmentKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey, CUSTOM_CONNECTOR_ENABLED: 'true', MULTI_DEVICE: 'true', TEST_RECOVERY_ORIGIN: app.origin } }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'], host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey, CUSTOM_CONNECTOR_ENABLED: 'true', MULTI_DEVICE: 'true', TEST_RECOVERY_ORIGIN: app.origin } }));
   const origin = (await mf.ready).origin;
   const local = (route, body, headers = {}) => fetch(`${app.origin}/api/${route}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Chat2Local-Token': app.token, Origin: app.origin, 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const post = (url, value, headers = {}) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value), redirect: 'manual' });

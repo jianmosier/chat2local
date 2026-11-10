@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PrivateInstance } from '../src/relay/private-instance.mjs';
-import { AccountDirectory } from '../src/relay/account-directory.mjs';
+import { PrivateInstance } from './registry-fixture.mjs';
+import { AccountDirectory } from './registry-fixture.mjs';
 import { randomSecret } from '../src/shared/protocol.mjs';
 
 // Private aggregate fixture: HTTP device-key verification is exercised separately.

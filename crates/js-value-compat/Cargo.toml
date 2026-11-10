@@ -1,0 +1,8 @@
+[package]
+name = "chat2local-js-value-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ryu-js = "=1.0.3"

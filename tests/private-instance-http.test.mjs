@@ -1,3 +1,4 @@
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -30,9 +31,9 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   } });
   const appB = await startController({ port: 0, store: storeB, allowLocalRelay: true, pickFolder: async () => { picksB++; return folderB; } });
   t.after(async () => { await appA.close(); await appB.close(); await fs.rm(base, { recursive: true, force: true }); });
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module','main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module','main'], external: ['cloudflare:workers', '*.wasm'] });
   const ownerKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'], kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { PRIVATE_INSTANCE: 'true', ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: ownerKey, TEST_RECOVERY_ORIGIN: appA.origin } }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), host: '127.0.0.1', port: 0, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat','global_fetch_strictly_public'], kvNamespaces: ['OAUTH_KV'], durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } }, bindings: { PRIVATE_INSTANCE: 'true', ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: ownerKey, TEST_RECOVERY_ORIGIN: appA.origin } }));
   t.after(() => mf.dispose()); const origin = (await mf.ready).origin;
   const callbackServer = http.createServer((_req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('Original MCP client'); });
   await new Promise(r => callbackServer.listen(0, '127.0.0.1', r));
@@ -245,6 +246,9 @@ test('private instance: NO IdP, owner invitation -> ONE native consent -> origin
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-A', exact: true }).check();
   await pageC.getByRole('checkbox', { name: '加入待授权列表 Batch-B', exact: true }).check();
   assert.equal(await pageC.locator('#pending select').count(), 0);
+  assert.equal(await pageC.locator('#share-access-profile').inputValue(), 'files');
+  assert.match(await pageC.locator('#editor .consent').innerText(), /不新增终端权限/);
+  await pageC.locator('#share-access-profile').selectOption('project');
   assert.match(await pageC.locator('#editor .consent').innerText(), /目录外文件/);
   assert.equal((await storeC.load()).config.terminalGrants?.length || 0, 0);
   await pageC.route('**/api/shares/confirm', async route => {

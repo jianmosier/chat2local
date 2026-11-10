@@ -1,5 +1,6 @@
 import { json, sha256 } from '../shared/protocol.mjs';
 import { checkedDevices, validEpoch, deviceDescription, MAX_GRANT_DEVICES } from '../shared/device-grants.mjs';
+import { registryResponse } from './registry-transaction.mjs';
 
 export const rosterCookieName = origin => origin.startsWith('https:') ? '__Host-c2l_devices' : 'c2l_devices';
 export function exactCookie(request, name) {
@@ -45,10 +46,10 @@ async function reserve(storage, prefix) {
 /** Only the Worker can call these internal storage routes. File tools cannot
  * create, append, consume, or otherwise mutate browser/device authorization.
  */
-export async function rosterStorageRoute(storage, route, value) {
+export async function rosterStorageRoute(storage, route, value, runner = null) {
   if (route === '/link-ticket/new') {
     if (!validEpoch(value.csrfHash) || !validEpoch(value.proofHash) || (value.previousHash !== null && !validEpoch(value.previousHash))) return json({ error: 'Invalid link ticket.' }, 400);
-    return storage.transaction(async tx => {
+    return registryResponse(storage, runner, 'roster.linkTicket.create', { value }, async tx => {
       await reserve(tx, 'link-ticket:');
       await tx.put(`link-ticket:${value.csrfHash}`, { proofHash: value.proofHash, previousHash: value.previousHash, expiresAt: Date.now() + 300000 });
       return json({ ok: true });
@@ -56,7 +57,7 @@ export async function rosterStorageRoute(storage, route, value) {
   }
   if (route === '/link-ticket/consume') {
     if (!validEpoch(value.csrfHash) || !validEpoch(value.proofHash)) return json({ error: 'Invalid browser confirmation.' }, 403);
-    return storage.transaction(async tx => {
+    return registryResponse(storage, runner, 'roster.linkTicket.consume', { value }, async tx => {
       const key = `link-ticket:${value.csrfHash}`; const ticket = await tx.get(key);
       if (!ticket || ticket.expiresAt <= Date.now() || ticket.proofHash !== value.proofHash || ticket.previousHash !== value.previousHash) return json({ error: 'Browser or target changed. Restart the connection.' }, 403);
       await tx.delete(key); return json({ ok: true });
@@ -70,7 +71,7 @@ export async function rosterStorageRoute(storage, route, value) {
   if (route === '/roster/append') {
     if (!validEpoch(value.sessionHash) || (value.previousHash !== null && !validEpoch(value.previousHash))) return json({ error: 'Invalid browser session.' }, 400);
     const target = checkedDevices([value.device])[0];
-    return storage.transaction(async tx => {
+    return registryResponse(storage, runner, 'roster.append', { value, target }, async tx => {
       const key = value.previousHash ? `browser-roster:${value.previousHash}` : null;
       const previous = key ? await tx.get(key) : null;
       const devices = previous?.expiresAt > Date.now() ? checkedDevices(previous.devices) : [];

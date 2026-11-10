@@ -8,6 +8,7 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { startController } from '../src/agent/main.mjs';
 import { guideProbe } from '../src/agent/connection-guide.mjs';
+import { relayEntry, relayRuntime } from './relay-runtime.mjs';
 
 const secret = () => randomBytes(32).toString('hex');
 // Opt-in fixture-stage diagnostics contain no URLs, tokens or file contents.
@@ -19,10 +20,10 @@ test('Cloudflare runtime: OAuth, device bridge and locally approved write end-to
   t.beforeEach(context => trace('subtest start: ' + context.name));
   t.afterEach(context => trace('subtest ended: ' + context.name));
   trace('bundle: start');
-  const bundle = await build({ entryPoints: ['src/relay/worker.mjs'], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers'] });
+  const bundle = await build({ entryPoints: [await relayEntry()], bundle: true, write: false, format: 'esm', platform: 'neutral', mainFields: ['module', 'main'], external: ['cloudflare:workers', '*.wasm'] });
   trace('bundle: ready');
   const enrollmentKey = secret();
-  const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...await relayRuntime(bundle), compatibilityDate: '2026-09-20', compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
     host: '127.0.0.1', port: 0, kvNamespaces: ['OAUTH_KV'],
     durableObjects: { DEVICES: { className: 'Device', useSQLite: true }, REGISTRY: { className: 'Registry', useSQLite: true } },
     bindings: { ALLOW_LOOPBACK: 'true', ENROLLMENT_KEY: enrollmentKey },

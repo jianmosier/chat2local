@@ -13,6 +13,7 @@ import { installPortable } from './install-portable.mjs';
 import { joinInvitation } from './join-instance.mjs';
 import { passwordSetup } from './setup-installer-password.mjs';
 import { ensureSubdomain } from './workers-subdomain.mjs';
+import { downloadWindowsRelease } from './download-windows-release.mjs';
 
 const project = fileURLToPath(new URL('..', import.meta.url));
 const configuration = path.join(project, 'wrangler.local.jsonc');
@@ -41,6 +42,7 @@ export async function npmEntry() {
 }
 async function save(file, value) { const temp = file + '.next'; await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 }); await fs.rename(temp, file); }
 async function localPackage() {
+  if (process.platform === 'win32') return installPortable(await downloadWindowsRelease(project), { noBrowser: true });
   const target = `${process.platform}-${process.arch}`;
   const name = packageNameFor(target, `${releaseTarget(target).prefix}-${VERSION.replaceAll('.', '-')}-public`);
   const directory = path.join(project, 'dist', name);

@@ -1,4 +1,5 @@
 import { json } from '../shared/protocol.mjs';
+import { registryResponse } from './registry-transaction.mjs';
 
 // Distinguish this relay-only hotfix without requiring a client/package upgrade.
 export const REQUEST_BUDGET_VERSION = 2;
@@ -20,12 +21,12 @@ export function requestBudget(pathname, method) {
   if (pathname === '/enroll-device' || pathname === '/install/start' || pathname.startsWith('/link/') || pathname.startsWith('/account/') || pathname.startsWith('/instance/')) return 'setup';
   return null;
 }
-export async function consumeBudget(storage, value, now = Date.now()) {
+export async function consumeBudget(storage, value, now = Date.now(), runner = null) {
   if (!value || !Object.hasOwn(limits, value.bucket)) return json({ error: 'Invalid budget.' }, 400);
   const scoped = value.bucket === 'device-read' || value.bucket === 'device-change';
   if (scoped ? !/^[a-f0-9]{32}$/.test(value.deviceId || '') : value.deviceId !== undefined) return json({ error: 'Invalid budget scope.' }, 400);
   const key = `budget:${value.bucket}${scoped ? ':' + value.deviceId : ''}`;
-  return storage.transaction(async tx => {
+  return registryResponse(storage, runner, 'budget.consume', { key, now, limit: limits[value.bucket] }, async tx => {
     let record = await tx.get(key);
     if (!record || record.until <= now) record = { count: 0, until: now + 3_600_000 };
     if (record.count >= limits[value.bucket]) {

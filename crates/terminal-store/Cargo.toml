@@ -1,0 +1,10 @@
+[package]
+name = "chat2local-terminal-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-agent-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "chat2local-writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chat2local-agent-platform.workspace = true
+chat2local-protocol.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true

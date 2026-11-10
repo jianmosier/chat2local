@@ -4,23 +4,29 @@ import { checkArguments } from '../shared/protocol.mjs';
 import { FileAccessPolicy } from './files/access-policy.mjs';
 import { forbiddenName, resolveFilePath } from './files/path-policy.mjs';
 import { FileOperationStore } from './files/operation-store.mjs';
+import { publicView, unknown } from './files/operation-contract.mjs';
 import { FileWriter, readTextSnapshot } from './files/storage.mjs';
+import { rootWriteMode } from './permissions.mjs';
 
 // Stable imports for existing controllers, installers and integrations.
 export { approveRoot, relativeParts } from './files/path-policy.mjs';
 
 /** File-tool use cases; policy, disk I/O and operation history are separate. */
 export class FileService {
-  constructor(getPolicy, stateDir, getDeviceInfo = () => undefined) {
-    Object.assign(this, { getPolicy, stateDir, getDeviceInfo });
+  constructor(getPolicy, stateDir, getDeviceInfo = () => undefined, { readonlyBackend, writerBackend, operationsCore, clock, getResource } = {}) {
+    Object.assign(this, { getPolicy, stateDir, getDeviceInfo, readonlyBackend, getResource: getResource ?? (() => null), resourceBound: getResource !== undefined });
     this.policy = new FileAccessPolicy(getPolicy, getDeviceInfo);
-    this.history = new FileOperationStore(stateDir);
+    this.history = new FileOperationStore(stateDir, { core: operationsCore, clock });
     this.operations = this.history.records;
-    this.operationAccess = this.history.owners;
     this.accessContext = this.policy.context;
     this.commitTail = Promise.resolve();
     this.writer = new FileWriter({
       stateDir,
+      writerBackend,
+      writeAuthority: (rootId, permission) => {
+        this.policyRoot(rootId, permission);
+        return this.readonlyAuthority(rootId);
+      },
       safePath: (...args) => this.safePath(...args),
       readSnapshot: (...args) => this.readSnapshot(...args),
       policyRoot: (...args) => this.policyRoot(...args),
@@ -35,7 +41,12 @@ export class FileService {
   prune() { this.history.prune(); }
   cancelPending(reason) { this.history.cancelPending(reason); }
   audit(action, details) { return this.history.audit(action, details); }
-  status(id) { return this.history.view(id, this.policy); }
+  status(id) {
+    if (this.getPolicy().paused) return unknown(id);
+    const access = this.accessContext.getStore(), resource = this.getResource();
+    if (access && (access.deviceId !== this.getDeviceInfo()?.deviceId || (this.resourceBound && access.resource !== resource))) return unknown(id);
+    return this.history.view(id, this.policy);
+  }
 
   async safePath(id, relative, options = {}) {
     const root = this.policyRoot(id, options.writing ?? false);
@@ -48,8 +59,7 @@ export class FileService {
   }
 
   pendingOperations() {
-    this.prune();
-    return [...this.operations.values()].filter(operation => operation.status === 'pending');
+    return this.history.pending();
   }
 
   async invoke(name, args = {}, access) {
@@ -83,7 +93,7 @@ export class FileService {
         default: throw new Error('Unknown file operation.');
       }
     } catch (error) {
-      if (error.code) throw new Error(`Filesystem operation failed (${error.code}).`);
+      if (error.code && !['EOPERATIONS', 'EPENDING', 'ECAPACITY', 'ENOT_PENDING'].includes(error.code)) throw new Error(`Filesystem operation failed (${error.code}).`);
       throw error;
     }
   }
@@ -98,6 +108,7 @@ export class FileService {
   }
 
   async listDirectory(args) {
+    if (this.readonlyBackend) return this.readonlyInvoke('list_directory', { rootId: args.rootId, path: args.path ?? '.' });
     const { target } = await this.safePath(args.rootId, args.path ?? '.', { directory: true });
     const entries = await fs.readdir(target, { withFileTypes: true });
     const visible = entries.filter(entry => !forbiddenName(entry.name) && !entry.isSymbolicLink()
@@ -109,16 +120,39 @@ export class FileService {
   }
 
   async readFile(args) {
-    const snapshot = await this.readSnapshot(args.rootId, args.path);
+    const snapshot = this.readonlyBackend
+      ? await this.readonlyInvoke('read_file', { rootId: args.rootId, path: args.path })
+      : await this.readSnapshot(args.rootId, args.path);
     await this.audit('read', { rootId: args.rootId, path: args.path });
     return { path: args.path, content: snapshot.content, sha256: snapshot.sha256 };
+  }
+
+  readonlyAuthority(rootId) {
+    const root = this.policyRoot(rootId);
+    const policy = this.getPolicy();
+    const legacy = policy.roots.includes(root);
+    const access = this.accessContext.getStore() ?? null;
+    const resource = this.getResource();
+    if (access && access.resource !== resource) throw new Error('Connection access belongs to a different relay.');
+    return { paused: policy.paused === true, deviceId: this.getDeviceInfo()?.deviceId ?? null, resource,
+      root: { id: root.id, path: root.path, kind: legacy ? 'legacy' : 'account',
+        connectionId: legacy ? null : root.connectionId, writeMode: rootWriteMode(root) }, access };
+  }
+
+  async readonlyInvoke(op, args) {
+    const snapshot = JSON.stringify(this.readonlyAuthority(args.rootId));
+    const result = await this.readonlyBackend.invoke(op, args, JSON.parse(snapshot));
+    // The dispatcher retains its FIFO slot until the child exits and this latest
+    // authorization check completes. Never return data after local revocation.
+    if (JSON.stringify(this.readonlyAuthority(args.rootId)) !== snapshot) throw new Error('Folder authorization changed during the read.');
+    return result;
   }
 
   async writeFile(args) {
     this.policyRoot(args.rootId, 'direct');
     if (!this.stateDir) throw new Error('Direct writing requires private backup and audit storage.');
-    const operation = this.remember({ ...args, status: 'applying', authorization: 'directory-direct' });
-    return this.#commit(operation);
+    const ticket = this.history.beginDirect({ ...args, operationId: randomUUID() }, this.accessContext.getStore());
+    return this.#commit(ticket);
   }
 
   async proposeWrite(args) {
@@ -126,40 +160,67 @@ export class FileService {
     if (this.pendingOperations().length >= 20) throw new Error('Too many pending proposals. Ask the local user to review them.');
     const snapshot = await this.readSnapshot(args.rootId, args.path, true);
     if (snapshot.sha256 !== args.expectedHash) throw new Error('File changed or already exists. Read it again before proposing a write.');
-    const operation = this.remember({ ...args, before: snapshot.content ?? '', status: 'pending' });
+    const operation = this.history.propose({ ...args, operationId: randomUUID(), before: snapshot.content ?? '' }, this.accessContext.getStore());
     await this.audit('proposed', { operationId: operation.operationId, rootId: args.rootId, path: args.path });
     return { operationId: operation.operationId, status: 'pending', message: 'Not written. Await local user approval, then call operation_status.' };
   }
 
-  remember(value) {
-    const operation = { ...value, operationId: randomUUID(), createdAt: Date.now() };
-    this.operations.set(operation.operationId, operation);
-    this.operationAccess.set(operation, this.accessContext.getStore());
-    return operation;
-  }
-
   async decide(id, approved) {
     if (typeof approved !== 'boolean') throw new Error('Local approval must be an explicit boolean.');
-    this.prune();
-    const operation = this.operations.get(id);
-    if (!operation || operation.status !== 'pending') throw new Error('Proposal is no longer pending.');
-    operation.status = approved ? 'applying' : 'rejected';
+    const decision = this.history.decide(id, approved);
     if (!approved) {
-      delete operation.content;
-      delete operation.before;
       await this.audit('rejected', { operationId: id });
-      return this.status(id);
+      return decision.status;
     }
-    operation.authorization = 'local-review';
-    return this.#commit(operation);
+    return this.#commit(decision.ticket, true);
   }
 
-  #commit(operation) {
+  #receiptVisible(rootId, binding) {
+    // State may have trapped. Check only the copied submission identity and
+    // current policy, never the failed state core or the mutable writer DTO.
+    try {
+      const access = this.accessContext.getStore() ?? null;
+      if ((binding?.connectionId ?? null) !== (access?.connectionId ?? null)
+        || (binding?.deviceId ?? null) !== (access?.deviceId ?? null)
+        || (binding?.resource ?? null) !== (access?.resource ?? null)) return false;
+      if (binding && (binding.deviceId !== this.getDeviceInfo()?.deviceId
+        || (this.resourceBound && binding.resource !== this.getResource()))) return false;
+      const root = this.availableRoots().find(root => root.id === rootId);
+      return !this.getPolicy().paused && Boolean(root && this.scopedMode(root));
+    } catch { return false; }
+  }
+
+  #commit(ticket, localDecision = false) {
     // Re-enter the original connection scope and check policy inside the queue.
-    const access = this.operationAccess.get(operation);
-    const result = this.commitTail.then(() => this.accessContext.run(access, async () => {
+    const { operation, attempt, owner } = ticket;
+    const { operationId, rootId, path, authorization } = operation;
+    const binding = owner && { connectionId: owner.connectionId, deviceId: owner.deviceId, resource: owner.resource };
+    const result = this.commitTail.then(() => this.accessContext.run(owner ?? undefined, async () => {
+      // An issued ticket is not permission to start after the state owner traps.
+      this.history.assertHealthy();
       await this.writer.commit(operation);
-      return this.status(operation.operationId);
+      try {
+        const finished = this.history.finish(operationId, attempt, operation);
+        const visible = localDecision ? finished : this.status(operationId);
+        this.history.assertHealthy();
+        return visible;
+      }
+      catch (error) {
+        // Even a valid ABI business error here means our completion ticket and
+        // authoritative state disagree. Freeze; never retry or replay a write.
+        this.history.freeze();
+        if (!localDecision && !this.#receiptVisible(rootId, binding)) {
+          return { ...unknown(operationId), message: 'Write outcome is unknown for this connection. Operation history is unavailable; do not retry.' };
+        }
+        // This transient receipt reflects the writer's actual outcome. It is not
+        // retained or replayed; all later history queries return unknown.
+        const receipt = publicView({ ...operation, operationId, path, authorization });
+        const warning = ['written', 'approved'].includes(operation.status)
+          ? 'File was written, but operation history is unavailable. New writes are blocked; inspect local files before proceeding.'
+          : 'Operation history is unavailable; do not retry.';
+        receipt.message = [operation.message, warning].filter(Boolean).join(' ');
+        return receipt;
+      }
     }));
     this.commitTail = result.catch(() => {});
     return result;

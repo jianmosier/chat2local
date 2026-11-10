@@ -9,8 +9,9 @@ async function privateCall(env, action, input) {
   const response = await registry(env).fetch(new Request('http://internal/onboarding/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }));
   const result = await response.json(); if (!response.ok) throw fail(result.error || 'Account operation failed.', response.status); return result;
 }
-function services(env, origin) {
+function services(env, origin, { oidcDecisionFactory, oidcTokenVerifierFactory } = {}) {
   const login = new OidcLogin({ env, origin, records: (action, kind, secret, value, ttl) => privateCall(env, 'records', { action, kind, secret, value, ttl }),
+    decisionFactory: oidcDecisionFactory, tokenVerifierFactory: oidcTokenVerifierFactory,
     ...(env.ALLOW_LOOPBACK === 'true' && /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(origin) && env.TEST_IDENTITY_HTTP ? { request: (url, options) => env.TEST_IDENTITY_HTTP.fetch(new Request(url, options)) } : {}) });
   return { login, identity: new AccountIdentity({ verifySession: request => login.verifySession(request) }) };
 }
@@ -24,10 +25,10 @@ const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&':'&amp;', '
 function accountPage(title, body, status = 200) {
   return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>chat2local</title><style>body{font:16px/1.7 system-ui;background:#f5f6f8;color:#1b2434;padding:32px 18px}main{max-width:540px;margin:5vh auto;background:white;padding:26px;border-radius:16px}a{display:block;padding:12px;margin:12px 0;border:1px solid #d4deeb;border-radius:8px;color:#2155be}h1{font-size:25px}small{overflow-wrap:anywhere}</style><main><h1>${escape(title)}</h1>${body}</main></html>`, { status, headers: { 'Content-Type':'text/html; charset=utf-8' } });
 }
-export async function accountAuthorize(request, env, origin, authRequest, client) {
+export async function accountAuthorize(request, env, origin, authRequest, client, options) {
   const resources = new URL(request.url).searchParams.getAll('resource');
   if (resources.length > 1 || resources.some(resource => resource !== origin + '/mcp')) throw fail('Authorization resource does not match this service.');
-  const { login, identity } = services(env, origin);
+  const { login, identity } = services(env, origin, options);
   let principal;
   try { principal = await identity.authenticate(request); } catch (error) { if (error.code !== 'ACCOUNT_LOGIN_REQUIRED') throw error; return login.begin(new URL(request.url).pathname + new URL(request.url).search); }
   const actor = accountPrincipal(principal), resource = origin + '/mcp';
@@ -41,16 +42,16 @@ export async function accountAuthorize(request, env, origin, authRequest, client
   const flow = await privateCall(env, 'start', { actor, displayName: principal.displayName, clientName: client.clientName || '未命名应用', authRequest, resource });
   return nativeNavigation(env, origin, flow);
 }
-export async function accountRoute(request, env, origin) {
+export async function accountRoute(request, env, origin, options) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith('/account/')) return null;
   if (env.ACCOUNT_CONNECTIONS !== 'true') return json({ error: 'Account onboarding is not enabled.' }, 404);
-  if (url.pathname === '/account/callback' && request.method === 'GET') return services(env, origin).login.callback(request);
+  if (url.pathname === '/account/callback' && request.method === 'GET') return services(env, origin, options).login.callback(request);
   if (url.pathname === '/account/add' && request.method === 'GET') {
     if (url.searchParams.getAll('connection').length > 1 || [...url.searchParams.keys()].some(k => k !== 'connection')) throw fail('Invalid connection selection.');
     const selected = url.searchParams.get('connection');
     if (selected !== null && !isAccountId(selected)) throw fail('Invalid connection selection.');
-    const { identity, login } = services(env, origin);
+    const { identity, login } = services(env, origin, options);
     let principal;
     try { principal = await identity.authenticate(request); } catch (error) { if (error.code !== 'ACCOUNT_LOGIN_REQUIRED') throw error; return login.begin(url.pathname + url.search); }
     const actor = accountPrincipal(principal), resource = origin + '/mcp';
@@ -78,7 +79,7 @@ export async function accountRoute(request, env, origin) {
     if (url.searchParams.getAll('flow').length !== 1 || [...url.searchParams.keys()].some(k => k !== 'flow')) throw fail('Invalid account continuation.');
     const flowId = url.searchParams.get('flow'), browser = identityCookie(request, 'c2l_finish_' + flowId);
     if (!isAccountId(flowId) || !browser) throw fail('Return in the original browser to finish connecting.', 401);
-    const principal = await services(env, origin).identity.authenticate(request);
+    const principal = await services(env, origin, options).identity.authenticate(request);
     const value = await privateCall(env, 'finish', { flowId, browser, actor: accountPrincipal(principal) });
     if (value.joined === true) return accountPage('已加入原来的 chat2local', '<p>这台电脑的所选文件夹已共享。直接回原 ChatGPT 对话使用，无需新增插件、重新授权或复制测试指令。</p><p><a href="https://chatgpt.com/">回到 ChatGPT</a></p>');
     // Reuse the SAME OAuth provider, registered callback and original state/PKCE.

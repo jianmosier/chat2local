@@ -5,9 +5,11 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { VERSION } from '../src/shared/protocol.mjs';
 import { packageEntries } from './archive.mjs';
-import { buildPublic, publicDocuments } from './build-public.mjs';
+import { buildPublic, publicDocuments, rustSourceFiles } from './build-public.mjs';
 import { checkSource } from './check-source.mjs';
 import { buildReleaseInstallers, verifyReleaseInstaller, releaseAssetFiles, RELEASE_TARGETS } from './release-artifacts.mjs';
+import { readNativeAgentArtifact } from './native-agent-artifact.mjs';
+import { TEST_GROUPS } from './test-groups.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -25,11 +27,13 @@ export function releaseOptions(args) {
     else if (arg==='--create-repo') value.create=true;
     else if (arg==='--repo' && args[i+1]) value.repo=args[++i];
     else if (arg==='--from' && args[i+1]) value.from=args[++i];
+    else if (arg==='--commit' && args[i+1]) value.commit=args[++i];
     else if (arg==='--help') value.help=true;
-    else throw Error('Usage: npm run release -- [--publish] [--repo OWNER/REPO] [--create-repo] [--from VERIFIED_REPORT]');
+    else throw Error('Usage: npm run release -- [--publish] [--repo OWNER/REPO] [--commit REVIEWED_SHA] [--from VERIFIED_REPORT]');
   }
   if (value.repo && (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo) || ['.','..'].includes(value.repo.split('/')[1]))) throw Error('Invalid repository name.');
   if (value.create && !value.publish) throw Error('--create-repo requires --publish.');
+  if (value.commit && !/^[a-f0-9]{40}$/.test(value.commit)) throw Error('An exact reviewed source commit is required.');
   return value;
 }
 export function validateRepository(repo, user, metadata, create) {
@@ -38,7 +42,7 @@ export function validateRepository(repo, user, metadata, create) {
   if (metadata && (metadata.full_name !== repo || metadata.archived || metadata.visibility !== 'public' || metadata.permissions?.push !== true)) throw Error('Target is not a writable public repository. No visibility or permission was changed.');
 }
 export async function inputFingerprint(directory = root) {
-  const fixed=['package.json','package-lock.json','install.sh','install.ps1','wrangler.jsonc','.gitignore',...publicDocuments];
+  const fixed=['package.json','package-lock.json','install.sh','install.ps1','start-chat2local.cmd','start-chat2local.sh','LICENSE','tsconfig.json','wrangler.jsonc','.gitignore',...publicDocuments,...rustSourceFiles];
   const names=[...fixed]; for(const sub of ['src','scripts','tests']) names.push(...await packageEntries(path.join(directory,sub),sub+'/'));
   const hash=createHash('sha256'); for(const name of names.sort()) {hash.update(name+'\0');hash.update(await fs.readFile(path.join(directory,name)));} return hash.digest('hex');
 }
@@ -80,75 +84,77 @@ async function verifyReport(file) {
   return report;
 }
 export async function prepareRelease() {
+  const native = process.env.CHAT2LOCAL_NATIVE_AGENT_RELEASE_EXECUTABLE;
+  if (!native) throw Error('Prepare the formal Windows native release first and set CHAT2LOCAL_NATIVE_AGENT_RELEASE_EXECUTABLE.');
+  await readNativeAgentArtifact(native);
+  const nativeTests = { CHAT2LOCAL_NATIVE_AGENT_TEST_REQUIRED: '1', CHAT2LOCAL_NATIVE_AGENT_TEST_EXECUTABLE: native };
   const pkg=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8')),lock=JSON.parse(await fs.readFile(path.join(root,'package-lock.json'),'utf8'));
   if(pkg.version!==VERSION||lock.version!==VERSION||lock.packages[''].version!==VERSION)throw Error('Package/protocol/lock versions disagree.');
   for(const file of ['install.sh','install.ps1'])if(!(await fs.readFile(path.join(root,file),'utf8')).includes(`'${VERSION}'`))throw Error('Bootstrap version does not match '+VERSION);
   const input=await inputFingerprint();
   console.log('Release 1/4: syntax and full regression checks. No GitHub writes.');
   await run(process.execPath,['scripts/check.mjs'],{visible:true});
-  for(let group=1;group<=3;group++)await run(process.execPath,['scripts/test-batch.mjs',String(group)],{visible:true,timeout:650000});
+  for(let group=1;group<=TEST_GROUPS;group++)await run(process.execPath,['scripts/test-batch.mjs',String(group)],{visible:true,env:nativeTests,timeout:650000});
   if(await inputFingerprint()!==input)throw Error('Source changed during verification; no release was prepared.');
   console.log('Release 2/4: export only the sanitized source allowlist and verify its manifest.');
   const output=path.join(root,'.artifacts','releases',VERSION+'-'+Date.now());
   const report=await buildPublic(output);
   report.installers = await buildReleaseInstallers(report.directory);
+  const windows = report.installers.find(item => item.target === 'win32-x64');
+  await run(process.execPath, ['--test', '--test-concurrency=1', 'tests/windows-release-download.test.mjs'], { visible: true, env: { CHAT2LOCAL_RELEASE_PACKAGE_TEST_ARCHIVE: windows.archive }, timeout: 150000 });
   if (await inputFingerprint() !== input) throw Error('Source changed during installer build; no release was prepared.');
   report.testsPassed=true;report.inputFingerprint=input;report.preparedAt=new Date().toISOString();
   const file=path.join(output,'publication-report.json');await fs.writeFile(file,JSON.stringify(report,null,2));
   await verifyReport(file); console.log('Prepared report: '+file);return {file,report};
 }
-export async function publishRelease(file,options) {
-  const report=await verifyReport(file);
-  const user=JSON.parse(await run('gh',['api','user','--jq','{login:.login,id:.id}']));
-  if(!/^[A-Za-z0-9-]+$/.test(user.login)||!Number.isInteger(user.id))throw Error('GitHub identity was not verified.');
-  const repo=options.repo||user.login+'/chat2local',tag='v'+VERSION;
-  const raw=await run('gh',['api','repos/'+repo],{missing404:true}),metadata=raw?JSON.parse(raw):null;
-  validateRepository(repo,user,metadata,options.create);
-  if(await run('gh',['api',`repos/${repo}/releases/tags/${tag}`],{missing404:true}))throw Error('This release tag already exists. Increment the version; assets are never clobbered.');
-  const work=path.join(path.dirname(file),'git-publication');
-  try{await fs.lstat(work);throw Error('Publication worktree already exists. Inspect its stage before resuming; it will not be deleted.');}catch(error){if(error.code!=='ENOENT')throw error;}
-  console.log('Release 3/4: update the verified public source tree without force-push.');
-  const identity={GIT_AUTHOR_NAME:user.login,GIT_COMMITTER_NAME:user.login,GIT_AUTHOR_EMAIL:`${user.id}+${user.login}@users.noreply.github.com`,GIT_COMMITTER_EMAIL:`${user.id}+${user.login}@users.noreply.github.com`};
-  const hooks=path.join(path.dirname(file),'empty-hooks');await fs.mkdir(hooks);
-  const git=(args)=>run('git',['-c','core.hooksPath='+hooks,'-c','credential.helper=','-c','credential.helper=!gh auth git-credential',...args],{cwd:work,env:identity});
-  let branch=metadata?.default_branch||'main',previous=null;
-  const branchHead=metadata?await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`],{missing404:true}):null;
-  if(branchHead){
-    await run('git',['-c','core.hooksPath='+hooks,...publicationCloneArgs(branch,`https://github.com/${repo}.git`,work)]);
-    try{previous=JSON.parse(await fs.readFile(path.join(work,'SOURCE-SHA256.json'),'utf8'));}catch{throw Error('Existing repository is not a managed chat2local release. Inspect history before adopting it.');}
-    if(previous.product!=='chat2local-source')throw Error('Existing repository identity differs.');
-    await checkSource(work,path.join(work,'SOURCE-SHA256.json')); // Refuse unreviewed upstream edits.
-  }else{await fs.mkdir(work);await git(['init','-b',branch]);}
-  await syncSnapshot(report.directory,work,previous);
-  await checkSource(work,path.join(report.directory,'SOURCE-SHA256.json'));
-  await git(['config','core.autocrlf','false']);await git(['add','--all']);
-  await git(['-c','commit.gpgsign=false','commit','-m',`Release ${VERSION}: consolidate README and refresh verified packages`]);
-  const commit=await git(['rev-parse','HEAD']);if(!/^[a-f0-9]{40}$/.test(commit))throw Error('Commit was not verified.');
-  if(!metadata)await run('gh',['repo','create',repo,'--public','--description','Self-hosted multi-device MCP access with explicit folder and terminal permissions.']);
-  if(!branchHead)await git(['remote','add','origin',`https://github.com/${repo}.git`]);
-  await git(['push','--set-upstream','origin',branch]);
-  const remote=await run('gh',['api',`repos/${repo}/git/ref/heads/${branch}`,'--jq','.object.sha']);
-  if(remote!==commit)throw Error('Remote changed or push was not confirmed; no release created.');
-  console.log('Release 4/4: upload draft assets, download them back, then publish.');
-  const notes=`Alpha preview ${VERSION}. Consolidates public instructions into one README with four sections: first pairing, reconnecting, multiple devices and management. Public command examples use environment variables or fictional instance values while retaining working GitHub download URLs. Includes release-test fixture and prepare-task safeguards. Source, Windows x64, macOS ARM64 and x64 packages are freshly verified against the same source manifest; downloaded release assets are checked before publication. No new product features, Rust changes, DevSpace runtime dependency or permission expansion. Existing historical references/assets are not rewritten. Cloud deployment, private installation endpoints and each client's installed version require separate checks. Physical Mac update, full-machine reboot, clean-account setup and independent security review remain separate acceptance items.`;
-  const assetFiles = releaseAssetFiles(report);
-  await run('gh',['release','create',tag,...assetFiles,'--repo',repo,'--target',commit,'--draft','--prerelease','--title','chat2local '+VERSION,'--notes',notes]);
-  const verify=path.join(path.dirname(file),'remote-assets');await fs.mkdir(verify);
-  await run('gh',['release','download',tag,'--repo',repo,'--dir',verify]);
-  if(sha(await fs.readFile(path.join(verify,path.basename(report.archive))))!==report.sha256)throw Error('Uploaded archive does not match; release remains a draft.');
-  if(!Buffer.from(await fs.readFile(path.join(verify,path.basename(report.archive)+'.sha256'))).equals(await fs.readFile(report.archive+'.sha256')))throw Error('Uploaded checksum differs; release remains a draft.');
-  for (const file of assetFiles) {
-    if (sha(await fs.readFile(path.join(verify, path.basename(file)))) !== sha(await fs.readFile(file))) throw Error('Uploaded release asset differs; release remains a draft: ' + path.basename(file));
+export async function verifyPublishedTree(tree, directory) {
+  const source = JSON.parse(await fs.readFile(path.join(directory, 'SOURCE-SHA256.json'), 'utf8'));
+  const names = [...Object.keys(source.files), 'SOURCE-SHA256.json'].sort();
+  const entries = tree.tree.filter(item => item.type === 'blob');
+  const parents = new Set(names.flatMap(name => { const parts = name.split('/'); return parts.slice(0, -1).map((_part, i) => parts.slice(0, i + 1).join('/')); }));
+  if (tree.tree.some(item => !['blob', 'tree'].includes(item.type) || item.type === 'tree' && (item.mode !== '040000' || !parents.has(item.path)))) throw Error('Remote source contains an unsupported entry or unexpected directory.');
+  if (tree.truncated || entries.map(item => item.path).sort().join('\n') !== names.join('\n')) throw Error('Remote source commit inventory differs from the reviewed snapshot.');
+  for (const item of entries) {
+    if (!['100644', '100755'].includes(item.mode)) throw Error('Remote source contains an unsafe file mode.');
+    const bytes = await fs.readFile(path.join(directory, item.path));
+    const digest = createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+    if (digest !== item.sha) throw Error('Remote source commit differs from the tested snapshot: ' + item.path);
   }
-  await run('gh',['release','edit',tag,'--repo',repo,'--draft=false','--prerelease']);
-  const release=JSON.parse(await run('gh',['api',`repos/${repo}/releases/tags/${tag}`]));
-  if(release.draft||!release.prerelease||release.assets.length!==assetFiles.length)throw Error('Publication state or complete artifact set was not confirmed.');
-  const result={repository:repo,commit,tag,url:release.html_url,sourceSha256:report.sha256,assets:release.assets.map(a=>({name:a.name,size:a.size})),published:true,prerelease:true};
-  await fs.writeFile(path.join(path.dirname(file),'published.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));return result;
+}
+export async function publishRelease(file, options) {
+  // Publishing never stages files, pushes main, merges a PR, or rewrites history.
+  const report = await verifyReport(file);
+  if (options.create) throw Error('Create the repository separately; this publisher only accepts reviewed commits in an existing repository.');
+  if (!/^[a-f0-9]{40}$/.test(options.commit || '')) throw Error('Publish requires --commit with the exact reviewed and pushed source commit.');
+  const user = JSON.parse(await run('gh', ['api', 'user', '--jq', '{login:.login,id:.id}']));
+  const repo = options.repo || user.login + '/chat2local', tag = 'v' + VERSION;
+  const metadata = JSON.parse(await run('gh', ['api', 'repos/' + repo]));
+  validateRepository(repo, user, metadata, false);
+  if (await run('gh', ['api', `repos/${repo}/releases/tags/${tag}`], { missing404: true })) throw Error('Release already exists; no existing assets were overwritten.');
+  if (await run('gh', ['api', `repos/${repo}/git/ref/tags/${tag}`], { missing404: true })) throw Error('Tag already exists; its ownership needs review before publication.');
+  const tree = JSON.parse(await run('gh', ['api', `repos/${repo}/git/trees/${options.commit}?recursive=1`]));
+  await verifyPublishedTree(tree, report.directory);
+  const notes = [
+    'Windows x64 installs the Rust Agent. Bundled Node supports installation and provisioning. The macOS packages use the Node Agent. The gateway uses JavaScript.',
+    'Public source export rejects private files, backups and rotated records. Windows ZIP extraction bounds declared sizes and actual streamed bytes before promoting a verified package. The native panel reports permanent faults and blocked browser storage. Background publication pins the reviewed commit and requires remote-state inspection after a failure.',
+    'Quit the old Agent normally before installing the update or selecting a retained verified native package for rollback. The installer preserves the current identity, permissions and data. If login startup is enabled, turn it off in the old panel before switching. Enable it again in the new panel if desired.',
+    'The Windows binary and helper are bound to the reviewed source and use the Cargo release profile with OpenSSL 3.5.8. General enrollment, pairing codes, disconnect and unattended upgrade remain incomplete. macOS archives are verified on the build host. Physical Mac execution is outside this release validation.',
+  ].join('\n\n');
+  const assetFiles = releaseAssetFiles(report);
+  console.log('Uploading a draft prerelease at the exact reviewed source commit.');
+  await run('gh', ['release', 'create', tag, ...assetFiles, '--repo', repo, '--target', options.commit, '--draft', '--prerelease', '--title', 'chat2local ' + VERSION, '--notes', notes]);
+  const verify = path.join(path.dirname(file), 'remote-assets'); await fs.mkdir(verify);
+  await run('gh', ['release', 'download', tag, '--repo', repo, '--dir', verify]);
+  for (const asset of assetFiles) if (sha(await fs.readFile(path.join(verify, path.basename(asset)))) !== sha(await fs.readFile(asset))) throw Error('Uploaded asset differs; Release remains draft: ' + path.basename(asset));
+  await run('gh', ['release', 'edit', tag, '--repo', repo, '--draft=false', '--prerelease']);
+  const release = JSON.parse(await run('gh', ['api', `repos/${repo}/releases/tags/${tag}`]));
+  if (release.draft || !release.prerelease || release.assets.length !== assetFiles.length) throw Error('Release publication state unconfirmed.');
+  const result = { repository: repo, commit: options.commit, tag, url: release.html_url, assets: release.assets.map(a => ({ name: a.name, size: a.size })), published: true, prerelease: true };
+  await fs.writeFile(path.join(path.dirname(file), 'published.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2)); return result;
 }
 export async function release(args=process.argv.slice(2)) {
   const options=releaseOptions(args);
-  if(options.help){console.log('npm run release prepares a tested, sanitized source snapshot. Add --publish to update GitHub; --create-repo explicitly permits first creation. --from VERIFIED_REPORT resumes publication only when source/tests/hashes still match. No force-push, existing tag overwrite, cloud deployment, credentials in output, or local permission changes.');return;}
+  if(options.help){console.log('npm run release prepares a tested, sanitized source snapshot. Publish existing reviewed source with --publish --commit EXACT_SHA --repo OWNER/REPO. Repository creation and PR merge are separate operations. --from VERIFIED_REPORT resumes publication only when source/tests/hashes still match. No force-push, existing tag overwrite, cloud deployment, credentials in output, or local permission changes.');return;}
   const file=options.from?path.resolve(options.from):(await prepareRelease()).file;
   if(options.publish)return publishRelease(file,options);
   const report=await verifyReport(file);console.log(JSON.stringify({report:file,version:report.version,sha256:report.sha256,published:false},null,2));
