@@ -8,7 +8,7 @@
 
 准备自己的 Cloudflare 账号，以及能添加自定义 MCP 服务的应用账号。各应用的账号、地区及功能开放条件以其当前界面为准。
 
-从 [Release 0.1.0-alpha.29](https://github.com/jianmosier/chat2local/releases/tag/v0.1.0-alpha.29) 下载 Windows x64 安装包，解压后双击 start-chat2local.cmd。日常 Agent 使用 Rust；包内 Node 仅用于安装与实例接入。macOS 安装包继续使用 Node Agent。Windows ARM64 暂无本次原生安装包。首次创建自己的云端实例时，下载并解压[同版本源码](https://github.com/jianmosier/chat2local/releases/download/v0.1.0-alpha.29/chat2local-source-v0.1.0-alpha.29.tar.gz)，在该源码目录运行：
+从 [Release 0.1.0-alpha.30](https://github.com/jianmosier/chat2local/releases/tag/v0.1.0-alpha.30) 下载 Windows x64 安装包，解压后双击 start-chat2local.cmd。日常 Agent 使用 Rust；包内 Node 仅用于安装与实例接入。macOS 安装包继续使用 Node Agent。Windows ARM64 暂无本次原生安装包。首次创建自己的云端实例时，下载并解压[同版本源码](https://github.com/jianmosier/chat2local/releases/download/v0.1.0-alpha.30/chat2local-source-v0.1.0-alpha.30.tar.gz)，在该源码目录运行：
 
 Windows PowerShell：
 
@@ -90,4 +90,4 @@ npm run build:public 只导出清单中的公开文本源码，排除个人配�
 
 </details>
 
-0.1.0-alpha.29 · [MIT License](LICENSE)
+0.1.0-alpha.30 · [MIT License](LICENSE)

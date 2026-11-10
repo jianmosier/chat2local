@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { VERSION } from '../src/shared/protocol.mjs';
 
 // Tool-friendly wrapper for the NORMAL release command. No skipped tests or
@@ -9,6 +10,23 @@ import { VERSION } from '../src/shared/protocol.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const directory = path.join(root, '.artifacts', 'release-task-' + VERSION);
 const record = path.join(directory, 'task.json');
+
+async function writeTask(value) {
+  const temporary = `${record}.${randomUUID()}.tmp`;
+  const file = await fs.open(temporary, 'wx', 0o600);
+  try {
+    try {
+      await file.writeFile(JSON.stringify(value, null, 2));
+    } finally {
+      await file.close();
+    }
+    await fs.rename(temporary, record);
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    throw error;
+  }
+}
+
 const [mode, repository, ...extra] = process.argv.slice(2);
 const exactCommit = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const commit = mode === 'start' && extra.length === 2 && extra[0] === '--commit' ? extra[1] : undefined;
@@ -30,7 +48,7 @@ if (mode === 'status') {
     action = previous.action;
     await fs.copyFile(record, path.join(directory, 'attempt-' + Date.now() + '.json'));
   } else await fs.mkdir(directory);
-  await fs.writeFile(record, JSON.stringify({ version: VERSION, repository, action, ...(action === 'publish' ? { commit } : {}), state: 'starting', startedAt: new Date().toISOString() }), { flag:mode === 'retry' ? 'w' : 'wx' });
+  await writeTask({ version: VERSION, repository, action, ...(action === 'publish' ? { commit } : {}), state: 'starting', startedAt: new Date().toISOString() });
   const worker = spawn(process.execPath, ['--use-env-proxy', fileURLToPath(import.meta.url), 'worker', repository], { cwd:root, detached:true, windowsHide:true, stdio:'ignore' });
   worker.unref(); console.log(JSON.stringify({ started:true, version:VERSION, workerPid:worker.pid }));
 } else {
@@ -38,7 +56,7 @@ if (mode === 'status') {
   if (task.repository !== repository || task.state !== 'starting' || !['prepare','publish'].includes(task.action)) throw Error('Task identity or action changed.');
   if (task.action === 'publish' && !exactCommit(task.commit)) throw Error('Publication task lacks an exact reviewed commit.');
   let log = '', writing = Promise.resolve();
-  const save = (state, result = {}) => fs.writeFile(record, JSON.stringify({ ...task, state, ...result }, null, 2));
+  const save = (state, result = {}) => writeTask({ ...task, state, ...result });
   await save('running');
   // Preparation never invokes GitHub or deployment operations. Retrying it
   // preserves the same action rather than silently promoting it to publication.
